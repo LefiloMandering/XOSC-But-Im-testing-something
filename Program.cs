@@ -1,38 +1,30 @@
-﻿using System;
-using System.IO;
+﻿using System.Diagnostics;
 using System.Net;
-using System.Net.Http;
-using System.Text;
-using System.Text.Json;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Collections.Generic;
-using System.Linq;
 using System.Numerics;
 using System.Runtime.InteropServices;
-using System.Diagnostics;
-using Raylib_cs;
+using System.Text;
+using System.Text.Json;
 using ImGuiNET;
+using Microsoft.Data.Sqlite;
+using Raylib_cs;
 using rlImGui_cs;
 using VRChat.API.Api;
 using VRChat.API.Client;
-using VRChat.API.Model;
 using File = System.IO.File;
 using Color = Raylib_cs.Color;
 
-namespace VRChatUnfriendManager
+namespace Unfriendmaxxing
 {
     public static class Paths
     {
         public static readonly string AppDataFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VRChatUnfriendManager");
         public static readonly string CookieFile = Path.Combine(AppDataFolder, "session.cookie");
         public static readonly string ConfigFile = Path.Combine(AppDataFolder, "user.config");
-        
-        // VRCX Paths
-        public static string VrcxBase => RuntimeInformation.IsOSPlatform(OSPlatform.Windows) 
+
+        public static string VrcxBase => RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
             ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VRCX")
-            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VRCX"); // Linux usually maps AppData to ~/.config
-            
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VRCX");
+
         public static string VrcxStartup => Path.Combine(VrcxBase, "startup");
 
         public static void EnsureExists() => Directory.CreateDirectory(AppDataFolder);
@@ -43,6 +35,10 @@ namespace VRChatUnfriendManager
         public string Id { get; set; } = "";
         public string DisplayName { get; set; } = "";
         public string LastLogin { get; set; } = "";
+        /// <summary>Total time spent together in milliseconds (from VRCX).</summary>
+        public long TimeSpentMs { get; set; } = 0;
+        /// <summary>Profile picture thumbnail URL from VRChat API (~256px).</summary>
+        public string ThumbnailUrl { get; set; } = "";
     }
 
     public class AppConfig
@@ -63,10 +59,14 @@ namespace VRChatUnfriendManager
         public bool RunOnStartup { get; set; } = false;
         public bool VrcxStartupDesktop { get; set; } = false;
         public bool VrcxStartupVr { get; set; } = false;
-        public bool UseCustomTitleBar { get; set; } = true;
+        /// <summary>
+        /// VRChat native favorite group tags to exclude from the list (e.g. "group_0", "group_1").
+        /// The display names are fetched live from the API and stored in favGroupNames at runtime.
+        /// </summary>
+        public List<string> ExcludedFavGroups { get; set; } = new();
     }
 
-    // --- API Service (Unchanged mostly) ---
+    // --- API Service ---
     public class VRChatApiService
     {
         private const string UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
@@ -99,6 +99,9 @@ namespace VRChatUnfriendManager
             try { File.WriteAllText(Paths.CookieFile, fullCookie); } catch { }
             Program.config.Cookie = fullCookie;
             Program.SaveConfig();
+
+            // Keep the image downloader authenticated
+            TextureCache.SetCookie(fullCookie);
         }
 
         private async Task<bool> TestSessionAsync()
@@ -113,7 +116,11 @@ namespace VRChatUnfriendManager
                 var r = await test.GetAsync("https://api.vrchat.cloud/api/1/auth/user");
                 if (!r.IsSuccessStatusCode) return false;
                 var body = await r.Content.ReadAsStringAsync();
-                return body.Contains("\"id\"", StringComparison.OrdinalIgnoreCase);
+                if (!body.Contains("\"id\"", StringComparison.OrdinalIgnoreCase)) return false;
+                // Opportunistically grab the user ID so GetFavoriteGroupNamesAsync works immediately
+                var (_, userId) = ParseUserFromJson(body);
+                if (!string.IsNullOrWhiteSpace(userId)) CurrentUserId = userId;
+                return true;
             }
             catch { return false; }
         }
@@ -124,24 +131,30 @@ namespace VRChatUnfriendManager
             try
             {
                 var user = await new AuthenticationApi(cfg).GetCurrentUserAsync();
-                return user.DisplayName ?? user.Username;
+                CurrentUserId = user?.Id;
+                var name = user?.DisplayName;
+                if (!string.IsNullOrWhiteSpace(name)) return name;
+                return user?.Username;
             }
             catch { return null; }
         }
 
         public async Task<(bool success, string? displayName)> RestoreSessionFromDiskOrConfigAsync()
         {
+            // 1. Try saved cookie from config
             if (!string.IsNullOrWhiteSpace(Program.config.Cookie) && Program.config.Cookie.Contains("auth="))
             {
                 cfg = new Configuration { UserAgent = UA };
                 cfg.DefaultHeaders["Cookie"] = Program.config.Cookie.Trim();
                 if (await TestSessionAsync())
                 {
-                    var name = await GetCurrentDisplayNameAsync() ?? "You";
-                    return (true, name);
+                    TextureCache.SetCookie(Program.config.Cookie.Trim());
+                    var name = await GetCurrentDisplayNameAsync();
+                    if (!string.IsNullOrWhiteSpace(name)) return (true, name);
                 }
             }
 
+            // 2. Try cookie file on disk
             if (File.Exists(Paths.CookieFile))
             {
                 var cookie = await File.ReadAllTextAsync(Paths.CookieFile);
@@ -153,110 +166,116 @@ namespace VRChatUnfriendManager
                     {
                         Program.config.Cookie = cookie.Trim();
                         Program.SaveConfig();
-                        var name = await GetCurrentDisplayNameAsync() ?? "You";
-                        return (true, name);
+                        TextureCache.SetCookie(cookie.Trim());
+                        var name = await GetCurrentDisplayNameAsync();
+                        if (!string.IsNullOrWhiteSpace(name)) return (true, name);
                     }
                 }
             }
 
-            if (Program.config.RememberMe && !string.IsNullOrEmpty(Program.config.Username) && !string.IsNullOrEmpty(Program.config.EncodedPassword))
+            // 3. Always attempt credential login if we have saved credentials —
+            //    regardless of RememberMe. This will surface the 2FA dialog if needed.
+            if (!string.IsNullOrEmpty(Program.config.Username) && !string.IsNullOrEmpty(Program.config.EncodedPassword))
             {
-                var pass = Encoding.UTF8.GetString(Convert.FromBase64String(Program.config.EncodedPassword));
-                var (success, name, error) = await LoginWithCredentialsAsync(Program.config.Username, pass);
-                if (success && name != null) return (true, name);
+                var p = Encoding.UTF8.GetString(Convert.FromBase64String(Program.config.EncodedPassword));
+                var (success, name, error) = await LoginWithCredentialsAsync(Program.config.Username, p);
+                if (success && !string.IsNullOrWhiteSpace(name)) return (true, name);
             }
 
             return (false, null);
-        }
-
-        private string ExtractCsrfToken(string html)
-        {
-            const string marker = "name=\"csrf_token\" value=\"";
-            int start = html.IndexOf(marker);
-            if (start == -1) return "";
-            start += marker.Length;
-            int end = html.IndexOf('"', start);
-            return end == -1 ? "" : html.Substring(start, end - start);
         }
 
         public async Task<(bool success, string? displayName, string? error)> LoginWithCredentialsAsync(string username, string password)
         {
             try
             {
-                // 1. USE BASIC AUTH (Bypasses Cloudflare HTML checks)
                 client.DefaultRequestHeaders.Clear();
                 client.DefaultRequestHeaders.Add("User-Agent", UA);
-        
-                // Create Basic Auth Header
+
                 var authString = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{username}:{password}"));
                 client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Basic", authString);
 
-                // 2. ATTEMPT LOGIN DIRECTLY VIA API
                 var response = await client.GetAsync("https://api.vrchat.cloud/api/1/auth/user");
                 var body = await response.Content.ReadAsStringAsync();
 
-                // 3. HANDLE 2FA (If required)
                 if (body.Contains("requiresTwoFactorAuth"))
                 {
                     show2FADialog = true;
                     tfaTcs = new TaskCompletionSource<string?>();
-            
-                    // Wait for user to enter code in UI
+
                     var code = await tfaTcs.Task;
-            
+
                     if (string.IsNullOrEmpty(code))
                     {
                         client.DefaultRequestHeaders.Authorization = null;
                         return (false, null, "2FA Cancelled");
                     }
 
-                    // Verify 2FA
-                    client.DefaultRequestHeaders.Authorization = null; // Clear Basic Auth for the verify step
-            
+                    client.DefaultRequestHeaders.Authorization = null;
+
                     var verifyJson = JsonSerializer.Serialize(new { code = code });
                     var verifyContent = new StringContent(verifyJson, Encoding.UTF8, "application/json");
-            
+
                     var verifyResp = await client.PostAsync("https://api.vrchat.cloud/api/1/auth/twofactorauth/totp/verify", verifyContent);
-            
-                    if (!verifyResp.IsSuccessStatusCode) 
+
+                    if (!verifyResp.IsSuccessStatusCode)
                         return (false, null, "2FA Verification Failed");
+
+                    // After 2FA, re-fetch user to get display name
+                    client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Basic", authString);
+                    var reResp = await client.GetAsync("https://api.vrchat.cloud/api/1/auth/user");
+                    body = await reResp.Content.ReadAsStringAsync();
+                    client.DefaultRequestHeaders.Authorization = null;
                 }
                 else if (!response.IsSuccessStatusCode)
                 {
                     client.DefaultRequestHeaders.Authorization = null;
                     return (false, null, $"Login failed: {response.StatusCode}");
                 }
-        
-                // Clear auth header after success
+
                 client.DefaultRequestHeaders.Authorization = null;
 
-                // 4. SAFE COOKIE EXTRACTION (Fixes NullReferenceException)
+                // Extract auth cookie
                 var cookieCollection = cookies.GetCookies(BaseUri);
                 Cookie? authCookie = null;
                 foreach (Cookie c in cookieCollection) if (c.Name == "auth") authCookie = c;
 
-                if (authCookie == null) 
-                    return (false, null, "Login successful, but 'auth' cookie was not found.");
+                if (authCookie == null)
+                    return (false, null, "Login succeeded but 'auth' cookie was not set. Check your credentials.");
 
                 string fullCookie = $"auth={authCookie.Value}";
                 var tfaCookie = cookies.GetCookies(BaseUri)["twoFactorAuth"];
                 if (tfaCookie != null) fullCookie += $"; twoFactorAuth={tfaCookie.Value}";
 
-                // 5. INITIALIZE CONFIGURATION SAFELY
                 cfg = new Configuration();
                 cfg.UserAgent = UA;
-                if (cfg.DefaultHeaders == null) cfg.DefaultHeaders = new Dictionary<string, string>();
+                cfg.DefaultHeaders ??= new Dictionary<string, string>();
                 cfg.DefaultHeaders["Cookie"] = fullCookie;
-        
+
                 SaveCookies();
 
-                // 6. GET CURRENT USER
-                var authApi = new AuthenticationApi(cfg);
-                var user = await authApi.GetCurrentUserAsync();
-        
-                if (user == null) return (false, null, "Failed to retrieve user details.");
-        
-                return (true, user.DisplayName ?? user.Username, null);
+                // Parse displayName + userId directly from the response body we already have —
+                // the /auth/user endpoint returns the full CurrentUser object on success.
+                var (displayName, userId) = ParseUserFromJson(body);
+                if (!string.IsNullOrWhiteSpace(userId)) CurrentUserId = userId;
+
+                // If JSON parsing failed for some reason, fall back to the SDK call
+                if (string.IsNullOrWhiteSpace(displayName))
+                {
+                    try
+                    {
+                        var authApi = new AuthenticationApi(cfg);
+                        var sdkUser = await authApi.GetCurrentUserAsync();
+                        displayName = sdkUser?.DisplayName ?? sdkUser?.Username;
+                        CurrentUserId = sdkUser?.Id ?? CurrentUserId;
+                    }
+                    catch { }
+                }
+
+                if (string.IsNullOrWhiteSpace(displayName))
+                    return (false, null, "Logged in but could not read display name. Try again.");
+
+                return (true, displayName, null);
             }
             catch (Exception ex)
             {
@@ -264,7 +283,33 @@ namespace VRChatUnfriendManager
                 return (false, null, $"Error: {ex.Message}");
             }
         }
-        
+
+        /// <summary>
+        /// Parses displayName and id from VRChat's /auth/user response JSON.
+        /// Returns (displayName, userId) — either may be null if parsing fails.
+        /// </summary>
+        private static (string? displayName, string? userId) ParseUserFromJson(string json)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+                string? name = null, id = null;
+
+                if (root.TryGetProperty("displayName", out var dn) && dn.ValueKind == JsonValueKind.String)
+                    name = dn.GetString();
+                else if (root.TryGetProperty("username", out var un) && un.ValueKind == JsonValueKind.String)
+                    name = un.GetString();
+
+                if (root.TryGetProperty("id", out var idProp) && idProp.ValueKind == JsonValueKind.String)
+                    id = idProp.GetString();
+
+                return (name, id);
+            }
+            catch { }
+            return (null, null);
+        }
+
         public void Draw2FADialog()
         {
             if (!show2FADialog || tfaTcs == null) return;
@@ -304,6 +349,9 @@ namespace VRChatUnfriendManager
         public FriendsApi Friends => cfg != null ? new FriendsApi(cfg) : throw new InvalidOperationException("Not logged in");
         public FavoritesApi Favorites => cfg != null ? new FavoritesApi(cfg) : throw new InvalidOperationException("Not logged in");
 
+        /// <summary>The logged-in user's VRChat user ID (e.g. usr_xxxx). Set after login.</summary>
+        public string? CurrentUserId { get; private set; }
+
         public async Task UnfriendAsync(string id)
         {
             await Friends.UnfriendAsync(id);
@@ -319,7 +367,13 @@ namespace VRChatUnfriendManager
                 {
                     Id = u.Id,
                     DisplayName = u.DisplayName ?? "Unknown",
-                    LastLogin = u.LastLogin?.ToString("o") ?? ""
+                    LastLogin = u.LastLogin?.ToString("o") ?? "",
+                    // Prefer the small thumbnail; fall back to the full image URL
+                    ThumbnailUrl = u.CurrentAvatarThumbnailImageUrl
+                              ?? u.CurrentAvatarImageUrl
+                              ?? u.ProfilePicOverrideThumbnail
+                              ?? u.ProfilePicOverride
+                              ?? "",
                 }));
                 if (page.Count < 100) break;
             }
@@ -330,23 +384,349 @@ namespace VRChatUnfriendManager
                 {
                     Id = u.Id,
                     DisplayName = u.DisplayName ?? "Unknown",
-                    LastLogin = u.LastLogin?.ToString("o") ?? ""
+                    LastLogin = u.LastLogin?.ToString("o") ?? "",
+                    ThumbnailUrl = u.CurrentAvatarThumbnailImageUrl
+                              ?? u.CurrentAvatarImageUrl
+                              ?? u.ProfilePicOverrideThumbnail
+                              ?? u.ProfilePicOverride
+                              ?? "",
                 }));
                 if (page.Count < 100) break;
             }
             return list;
         }
 
-        public async Task<HashSet<string>> GetFavoriteFriendIdsAsync()
+        /// <summary>
+        /// Returns all favorited friend IDs (flat set) AND a mapping of
+        /// group tag (e.g. "group_0") -> set of favorited user IDs in that group.
+        /// </summary>
+        public async Task<(HashSet<string> allIds, Dictionary<string, HashSet<string>> byGroup)> GetFavoritesDetailedAsync()
         {
-            var set = new HashSet<string>();
+            var allIds  = new HashSet<string>();
+            var byGroup = new Dictionary<string, HashSet<string>>();
+
             for (int offset = 0; ; offset += 100)
             {
                 var page = await Favorites.GetFavoritesAsync(type: "friend", n: 100, offset: offset);
-                foreach (var f in page) set.Add(f.FavoriteId);
+                Console.WriteLine($"[FAV] offset={offset} count={page.Count}");
+                foreach (var f in page)
+                {
+                    allIds.Add(f.FavoriteId);
+                    // Tags[0] is the group tag e.g. "group_0"
+                    var tag = f.Tags?.FirstOrDefault() ?? "group_0";
+                    Console.WriteLine($"[FAV]   id={f.FavoriteId} tag={tag}");
+                    if (!byGroup.ContainsKey(tag)) byGroup[tag] = new HashSet<string>();
+                    byGroup[tag].Add(f.FavoriteId);
+                }
                 if (page.Count < 100) break;
             }
-            return set;
+            Console.WriteLine($"[FAV] Total: {allIds.Count} favorites across {byGroup.Count} groups: {string.Join(", ", byGroup.Keys)}");
+            return (allIds, byGroup);
+        }
+
+        /// <summary>
+        /// Fetches VRChat native favorite group names directly via the authenticated
+        /// HTTP client (bypasses SDK which requires ownerId and is unreliable).
+        /// Endpoint: GET /api/1/favorite/group?type=friend&n=10&ownerId={userId}
+        /// </summary>
+        public async Task<Dictionary<string, string>> GetFavoriteGroupNamesAsync()
+        {
+            var result = new Dictionary<string, string>();
+
+            // Try raw HTTP first — most reliable since client already has auth cookie
+            if (!string.IsNullOrEmpty(CurrentUserId))
+            {
+                try
+                {
+                    var url = $"https://api.vrchat.cloud/api/1/favorite/group?type=friend&n=10&offset=0&ownerId={CurrentUserId}";
+                    Console.WriteLine($"[FAV_GROUPS] GET {url}");
+                    var resp = await client.GetAsync(url);
+                    var body = await resp.Content.ReadAsStringAsync();
+                    Console.WriteLine($"[FAV_GROUPS] HTTP {(int)resp.StatusCode}: {body}");
+
+                    if (resp.IsSuccessStatusCode)
+                    {
+                        using var doc = JsonDocument.Parse(body);
+                        foreach (var g in doc.RootElement.EnumerateArray())
+                        {
+                            // Each element has: name (tag like "group_0"), displayName (user label), type, ownerId
+                            var tag         = g.TryGetProperty("name",        out var n)  ? n.GetString()  : null;
+                            var displayName = g.TryGetProperty("displayName", out var dn) ? dn.GetString() : null;
+                            Console.WriteLine($"[FAV_GROUPS]   tag={tag} displayName={displayName}");
+                            if (!string.IsNullOrEmpty(tag))
+                                result[tag] = !string.IsNullOrWhiteSpace(displayName) ? displayName : tag;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[FAV_GROUPS] Raw HTTP failed: {ex.Message}");
+                }
+            }
+
+            // Fallback: SDK call
+            if (result.Count == 0)
+            {
+                try
+                {
+                    Console.WriteLine($"[FAV_GROUPS] Falling back to SDK (ownerId={CurrentUserId})");
+                    var favGroups = await Favorites.GetFavoriteGroupsAsync(n: 10, offset: 0, ownerId: CurrentUserId);
+                    Console.WriteLine($"[FAV_GROUPS] SDK returned {favGroups.Count} groups");
+                    foreach (var g in favGroups)
+                    {
+                        var tag = g.Tags?.FirstOrDefault() ?? g.Name ?? "";
+                        Console.WriteLine($"[FAV_GROUPS]   SDK: name={g.Name} displayName={g.DisplayName} tag={tag}");
+                        if (!string.IsNullOrEmpty(tag))
+                            result[tag] = !string.IsNullOrWhiteSpace(g.DisplayName) ? g.DisplayName : tag;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[FAV_GROUPS] SDK also failed: {ex.Message}");
+                }
+            }
+
+            // Always ensure all four slots exist — VRChat has group_0 through group_3
+            for (int i = 0; i < 4; i++)
+            {
+                var key = $"group_{i}";
+                if (!result.ContainsKey(key)) result[key] = $"Group {i + 1}";
+            }
+
+            Console.WriteLine($"[FAV_GROUPS] Final: {string.Join(", ", result.Select(kv => $"{kv.Key}={kv.Value}"))}");
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// Thread-safe async texture cache for VRChat profile images.
+    /// Call SetCookie() once after login, then RequestTexture() each frame.
+    /// Call UnloadAll() on shutdown to free GPU memory.
+    /// </summary>
+    public static class TextureCache
+    {
+        private enum State { Downloading, Ready, Failed }
+
+        private sealed class Entry
+        {
+            public State State;
+            public Texture2D Texture;
+        }
+
+        private static readonly Dictionary<string, Entry> _cache = new();
+
+        // Separate HttpClient that carries the VRChat auth cookie
+        private static readonly CookieContainer _cookieContainer = new();
+        private static readonly HttpClient _http = new(
+            new HttpClientHandler { CookieContainer = _cookieContainer, UseCookies = true })
+        {
+            Timeout = TimeSpan.FromSeconds(20),
+            DefaultRequestHeaders = { { "User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36" } }
+        };
+
+        private static readonly Uri VrcApiBase = new("https://api.vrchat.cloud/");
+
+        /// <summary>
+        /// Set (or update) the VRChat auth cookie. Call this right after login / session restore.
+        /// </summary>
+        public static void SetCookie(string cookieHeader)
+        {
+            // cookieHeader looks like "auth=xxx" or "auth=xxx; twoFactorAuth=yyy"
+            foreach (var part in cookieHeader.Split(';', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var kv = part.Trim().Split('=', 2);
+                if (kv.Length == 2)
+                    _cookieContainer.Add(VrcApiBase, new Cookie(kv[0].Trim(), kv[1].Trim()));
+            }
+        }
+
+        /// <summary>
+        /// Returns a loaded Texture2D for the given URL, or null if not yet ready.
+        /// Must be called from the main (render) thread.
+        /// </summary>
+        public static Texture2D? RequestTexture(string url)
+        {
+            if (string.IsNullOrWhiteSpace(url)) return null;
+
+            lock (_cache)
+            {
+                if (_cache.TryGetValue(url, out var entry))
+                    return entry.State == State.Ready ? entry.Texture : null;
+
+                _cache[url] = new Entry { State = State.Downloading };
+            }
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var bytes = await _http.GetByteArrayAsync(url);
+                    if (bytes.Length < 4)
+                    {
+                        MarkFailed(url);
+                        return;
+                    }
+
+                    // Detect format from magic bytes rather than URL extension
+                    // (VRChat image URLs have no extension and serve JPEG data)
+                    string fmt;
+                    if (bytes[0] == 0xFF && bytes[1] == 0xD8)
+                        fmt = ".jpg";
+                    else if (bytes[0] == 0x89 && bytes[1] == 0x50)
+                        fmt = ".png";
+                    else if (bytes[0] == 0x47 && bytes[1] == 0x49)
+                        fmt = ".gif";
+                    else
+                        fmt = ".jpg"; // VRChat default
+
+                    var img = Raylib.LoadImageFromMemory(fmt, bytes);
+                    if (img.Width == 0 || img.Height == 0) { MarkFailed(url); return; }
+
+                    Raylib.ImageResize(ref img, 32, 32);
+
+                    lock (_pendingLoad)
+                        _pendingLoad.Add((url, img));
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[IMG] Failed {url}: {ex.Message}");
+                    MarkFailed(url);
+                }
+            });
+
+            return null;
+        }
+
+        private static void MarkFailed(string url)
+        {
+            lock (_cache)
+                if (_cache.TryGetValue(url, out var e)) e.State = State.Failed;
+        }
+
+        private static readonly List<(string url, Image img)> _pendingLoad = new();
+
+        /// <summary>Upload pending textures to GPU. Call once per frame on the render thread.</summary>
+        public static void FlushPending()
+        {
+            List<(string url, Image img)> batch;
+            lock (_pendingLoad)
+            {
+                if (_pendingLoad.Count == 0) return;
+                batch = new List<(string, Image)>(_pendingLoad);
+                _pendingLoad.Clear();
+            }
+
+            foreach (var (url, img) in batch)
+            {
+                try
+                {
+                    var tex = Raylib.LoadTextureFromImage(img);
+                    Raylib.UnloadImage(img);
+                    lock (_cache)
+                    {
+                        if (_cache.TryGetValue(url, out var entry))
+                        {
+                            entry.Texture = tex;
+                            entry.State = State.Ready;
+                        }
+                        else Raylib.UnloadTexture(tex);
+                    }
+                }
+                catch
+                {
+                    lock (_cache)
+                        if (_cache.TryGetValue(url, out var e)) e.State = State.Failed;
+                }
+            }
+        }
+
+        /// <summary>Unload all GPU textures. Call on application shutdown.</summary>
+        public static void UnloadAll()
+        {
+            lock (_cache)
+            {
+                foreach (var entry in _cache.Values)
+                    if (entry.State == State.Ready)
+                        Raylib.UnloadTexture(entry.Texture);
+                _cache.Clear();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Reads time-together data from VRCX's local SQLite database.
+    /// Requires the NuGet package: Microsoft.Data.Sqlite
+    /// Add to your .csproj: &lt;PackageReference Include="Microsoft.Data.Sqlite" Version="8.*" /&gt;
+    /// </summary>
+    public static class VrcxDataService
+    {
+        private static string DbPath => Path.Combine(Paths.VrcxBase, "VRCX.sqlite3");
+        public static bool IsAvailable => File.Exists(DbPath);
+
+        /// <summary>
+        /// Returns userId -> total seconds spent together, computed from VRCX's
+        /// gamelog_join_leave table by pairing OnPlayerJoined / OnPlayerLeft events.
+        /// Each contiguous session (join→leave) per user is summed across all time.
+        /// </summary>
+        public static Dictionary<string, long> LoadTimeSpentSeconds()
+        {
+            var result = new Dictionary<string, long>();
+            if (!IsAvailable) return result;
+
+            try
+            {
+                using var connection = new Microsoft.Data.Sqlite.SqliteConnection(
+                    $"Data Source={DbPath};Mode=ReadOnly;Cache=Shared");
+                connection.Open();
+
+                // gamelog_join_leave columns: id, created_at, type, display_name, user_id, location
+                // 'type' is 'OnPlayerJoined' or 'OnPlayerLeft'
+                // We order by (user_id, created_at) so we can walk each user's events in order.
+                using var cmd = connection.CreateCommand();
+                cmd.CommandText = @"
+                    SELECT user_id, created_at, type
+                    FROM   gamelog_join_leave
+                    WHERE  user_id IS NOT NULL AND user_id != ''
+                    ORDER  BY user_id ASC, created_at ASC";
+
+                using var reader = cmd.ExecuteReader();
+
+                // Track the most recent join time per user within the current scan
+                var pendingJoin = new Dictionary<string, DateTime>();
+
+                while (reader.Read())
+                {
+                    var userId = reader.GetString(0);
+                    // created_at is stored as ISO-8601 text in VRCX
+                    if (!DateTime.TryParse(reader.GetString(1), out var ts)) continue;
+                    var type = reader.GetString(2);
+
+                    if (type == "OnPlayerJoined")
+                    {
+                        // If there's already a pending join (e.g. duplicate), overwrite with latest
+                        pendingJoin[userId] = ts;
+                    }
+                    else if (type == "OnPlayerLeft" && pendingJoin.TryGetValue(userId, out var joinTime))
+                    {
+                        var secs = (long)(ts - joinTime).TotalSeconds;
+                        if (secs > 0)
+                        {
+                            result.TryGetValue(userId, out var existing);
+                            result[userId] = existing + secs;
+                        }
+                        pendingJoin.Remove(userId);
+                    }
+                }
+
+                // Any still-pending joins (no matching leave) are ignored — they'd be ongoing sessions
+                // or truncated log entries; don't count unfinished time.
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[VRCX] DB read failed: {ex.Message}");
+            }
+
+            return result;
         }
     }
 
@@ -355,6 +735,10 @@ namespace VRChatUnfriendManager
         static VRChatApiService api = new();
         static List<SafeLimitedUserFriend> friends = new();
         static HashSet<string> favorites = new();
+        // byGroup: tag ("group_0") -> set of user IDs in that VRChat favorite group
+        static Dictionary<string, HashSet<string>> favByGroup = new();
+        // favGroupNames: tag -> display name as set by the user in VRChat
+        static Dictionary<string, string> favGroupNames = new();
         static List<SafeLimitedUserFriend> shown = new();
         static HashSet<int> selected = new();
         static string user = "", pass = "";
@@ -373,50 +757,42 @@ namespace VRChatUnfriendManager
         static int unfriendDone = 0;
         static CancellationTokenSource? unfriendCts;
         public static AppConfig config = new();
-        static bool autoRunning = false;
         static CancellationTokenSource? autoCts;
         static readonly string[] units = { "Days", "Months", "Years" };
-        static readonly string[] sorts = { "Oldest", "Newest", "A-Z", "Z-A" };
+        static readonly string[] sorts = { "Oldest", "Newest", "A-Z", "Z-A", "Most Time", "Least Time" };
         static readonly string[] autoModes = { "Inactive Only (3+ mo)", "All Shown", "Marked Only" };
         static bool isLoggedIn = false;
         static bool sessionRestored = false;
         static bool shouldExit = false;
 
-        // Windows Specific Imports (Wrapped)
+        // Windows Specific Imports
         [DllImport("kernel32.dll")] private static extern IntPtr GetConsoleWindow();
         [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
         private const int SW_HIDE = 0;
 
         public static async Task Main(string[] args)
         {
-            // 1. DETECT AUTOSTART ARGUMENT
             bool isAutostart = args.Contains("--autostart");
 
-            Console.WriteLine("VRChat Unfriend Manager v3 Starting...");
+            Console.WriteLine("VRChat Unfriend Manager Starting...");
             Paths.EnsureExists();
             LoadConfig();
 
-            // Sync VRCX Shortcuts
             if (Directory.Exists(Paths.VrcxStartup))
             {
                 UpdateVrcxShortcut("desktop", config.VrcxStartupDesktop);
                 UpdateVrcxShortcut("vr", config.VrcxStartupVr);
             }
 
-            // Ensure startup registry/file is correct (adds/removes the argument as needed)
             if (config.RunOnStartup) UpdateStartup(true);
 
-            // 2. CONFIGURE WINDOW FLAGS
+            // Standard window (no custom title bar)
             ConfigFlags flags = ConfigFlags.ResizableWindow | ConfigFlags.HighDpiWindow;
-            if (config.UseCustomTitleBar) flags |= ConfigFlags.UndecoratedWindow;
-            
-            // If autostarting, hide the window immediately
             if (isAutostart) flags |= ConfigFlags.HiddenWindow;
 
             Raylib.SetConfigFlags(flags);
-            Raylib.InitWindow(1280, 800, "VRChat Unfriend Manager v3");
-            
-            // Set Icon
+            Raylib.InitWindow(1280, 800, "VRChat Unfriend Manager");
+
             try
             {
                 string iconPath = "icon.png";
@@ -432,20 +808,19 @@ namespace VRChatUnfriendManager
 
             Raylib.SetTargetFPS(60);
 
-            // Hide Console on Windows
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
-                #if !DEBUG
+#if !DEBUG
                 try {
                     var consoleHwnd = GetConsoleWindow();
                     if (consoleHwnd != IntPtr.Zero) ShowWindow(consoleHwnd, SW_HIDE);
                 } catch {}
-                #endif
+#endif
             }
 
             rlImGui.Setup(true);
+            ApplyTheme();
 
-            // Init UI variables from Config
             user = config.Username;
             remember = config.RememberMe;
             hideFavs = config.ExcludeFavorites;
@@ -456,19 +831,17 @@ namespace VRChatUnfriendManager
 
             bool firstFrame = true;
 
-            // MAIN LOOP
             while (!shouldExit)
             {
-                // 3. BACKGROUND MODE (HIDDEN)
+                // Background / autostart mode
                 if (isAutostart)
                 {
-                    // Run initialization logic once
                     if (firstFrame)
                     {
                         firstFrame = false;
                         _ = Task.Run(async () =>
                         {
-                            await Task.Delay(1000); // Slight delay to let networking settle
+                            await Task.Delay(1000);
                             var (restored, name) = await api.RestoreSessionFromDiskOrConfigAsync();
                             if (restored && name != null)
                             {
@@ -476,40 +849,50 @@ namespace VRChatUnfriendManager
                                 isLoggedIn = true;
                                 sessionRestored = true;
                                 status = $"Background Login: {name}";
-                                
-                                // Start the scheduler if enabled
                                 if (config.AutoUnfriendEnabled) StartAutoScheduler();
                             }
                         });
                     }
 
-                    // Poll events to keep the application responsive to OS signals (like shutdown)
                     Raylib.PollInputEvents();
-                    
-                    // Sleep to save CPU since we aren't rendering
-                    Thread.Sleep(100); 
-                    continue; 
+                    Thread.Sleep(100);
+                    continue;
                 }
 
-                // 4. NORMAL MODE (VISIBLE)
                 if (Raylib.WindowShouldClose()) { shouldExit = true; continue; }
+
+                // Resize-aware: get current window size each frame
+                int screenW = Raylib.GetScreenWidth();
+                int screenH = Raylib.GetScreenHeight();
 
                 rlImGui.Begin();
                 Raylib.BeginDrawing();
-                Raylib.ClearBackground(new Color(20, 20, 30, 255));
+                Raylib.ClearBackground(new Color(15, 15, 20, 255));
 
+                // Upload any newly-downloaded textures to the GPU before rendering
+                TextureCache.FlushPending();
+
+                // Full-window ImGui panel, always tracks window size
                 ImGui.SetNextWindowPos(Vector2.Zero);
-                ImGui.SetNextWindowSize(new Vector2(Raylib.GetScreenWidth(), Raylib.GetScreenHeight()));
-                ImGui.Begin("Main", ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoTitleBar);
-
-                if (config.UseCustomTitleBar) DrawCustomTitleBar();
+                ImGui.SetNextWindowSize(new Vector2(screenW, screenH));
+                ImGui.Begin("##main", ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoTitleBar |
+                    ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoScrollbar |
+                    ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.NoBringToFrontOnFocus);
 
                 if (firstFrame)
                 {
                     firstFrame = false;
+                    // Show "Signing in..." immediately if we have credentials to try
+                    bool hasCredentials = !string.IsNullOrEmpty(config.Username) &&
+                                         !string.IsNullOrEmpty(config.EncodedPassword);
+                    bool hasCookie = (!string.IsNullOrEmpty(config.Cookie) && config.Cookie.Contains("auth="))
+                                     || File.Exists(Paths.CookieFile);
+                    if (hasCredentials || hasCookie)
+                        status = "Signing in...";
+
                     _ = Task.Run(async () =>
                     {
-                        await Task.Delay(500);
+                        await Task.Delay(200); // let the window paint once before blocking on network
                         var (restored, name) = await api.RestoreSessionFromDiskOrConfigAsync();
                         if (restored && name != null)
                         {
@@ -520,7 +903,13 @@ namespace VRChatUnfriendManager
                             await Refresh();
                             if (config.AutoUnfriendEnabled) StartAutoScheduler();
                         }
-                        else status = "Login required";
+                        else
+                        {
+                            // Clear any stale status — show clean login screen
+                            status = string.IsNullOrEmpty(config.Username)
+                                ? "Please log in"
+                                : "Session expired — please log in again";
+                        }
                     });
                 }
 
@@ -534,107 +923,127 @@ namespace VRChatUnfriendManager
             }
 
             SaveConfig();
+            TextureCache.UnloadAll();
             rlImGui.Shutdown();
             Raylib.CloseWindow();
         }
-        
-        private static void ShowUnfriendToast(string displayName)
+
+        // ─── Theme ─────────────────────────────────────────────────────────────────
+        static void ApplyTheme()
         {
-            ShowToast("Unfriended", $"{displayName} has been removed.");
+            var style = ImGui.GetStyle();
+            style.WindowRounding = 6f;
+            style.FrameRounding = 4f;
+            style.ScrollbarRounding = 4f;
+            style.GrabRounding = 4f;
+            style.TabRounding = 4f;
+            style.WindowPadding = new Vector2(12, 12);
+            style.FramePadding = new Vector2(6, 4);
+            style.ItemSpacing = new Vector2(8, 6);
+
+            var colors = style.Colors;
+            colors[(int)ImGuiCol.WindowBg]          = new Vector4(0.10f, 0.10f, 0.14f, 1f);
+            colors[(int)ImGuiCol.ChildBg]            = new Vector4(0.08f, 0.08f, 0.12f, 1f);
+            colors[(int)ImGuiCol.PopupBg]            = new Vector4(0.12f, 0.12f, 0.16f, 1f);
+            colors[(int)ImGuiCol.Border]             = new Vector4(0.25f, 0.25f, 0.35f, 1f);
+            colors[(int)ImGuiCol.FrameBg]            = new Vector4(0.16f, 0.16f, 0.22f, 1f);
+            colors[(int)ImGuiCol.FrameBgHovered]     = new Vector4(0.22f, 0.22f, 0.30f, 1f);
+            colors[(int)ImGuiCol.FrameBgActive]      = new Vector4(0.28f, 0.28f, 0.38f, 1f);
+            colors[(int)ImGuiCol.TitleBg]            = new Vector4(0.08f, 0.08f, 0.12f, 1f);
+            colors[(int)ImGuiCol.TitleBgActive]      = new Vector4(0.12f, 0.12f, 0.18f, 1f);
+            colors[(int)ImGuiCol.Tab]                = new Vector4(0.14f, 0.14f, 0.20f, 1f);
+            colors[(int)ImGuiCol.TabHovered]         = new Vector4(0.35f, 0.25f, 0.55f, 1f);
+            colors[(int)ImGuiCol.TabSelected]        = new Vector4(0.45f, 0.30f, 0.70f, 1f);
+            colors[(int)ImGuiCol.Header]             = new Vector4(0.30f, 0.20f, 0.50f, 0.6f);
+            colors[(int)ImGuiCol.HeaderHovered]      = new Vector4(0.40f, 0.27f, 0.65f, 0.8f);
+            colors[(int)ImGuiCol.HeaderActive]       = new Vector4(0.50f, 0.35f, 0.75f, 1f);
+            colors[(int)ImGuiCol.Button]             = new Vector4(0.30f, 0.20f, 0.50f, 1f);
+            colors[(int)ImGuiCol.ButtonHovered]      = new Vector4(0.45f, 0.30f, 0.70f, 1f);
+            colors[(int)ImGuiCol.ButtonActive]       = new Vector4(0.55f, 0.40f, 0.80f, 1f);
+            colors[(int)ImGuiCol.SliderGrab]         = new Vector4(0.55f, 0.40f, 0.80f, 1f);
+            colors[(int)ImGuiCol.SliderGrabActive]   = new Vector4(0.70f, 0.55f, 0.90f, 1f);
+            colors[(int)ImGuiCol.CheckMark]          = new Vector4(0.70f, 0.55f, 0.90f, 1f);
+            colors[(int)ImGuiCol.ScrollbarBg]        = new Vector4(0.08f, 0.08f, 0.12f, 1f);
+            colors[(int)ImGuiCol.ScrollbarGrab]      = new Vector4(0.30f, 0.20f, 0.50f, 1f);
+            colors[(int)ImGuiCol.ScrollbarGrabHovered] = new Vector4(0.45f, 0.30f, 0.65f, 1f);
+            colors[(int)ImGuiCol.ScrollbarGrabActive]  = new Vector4(0.55f, 0.40f, 0.75f, 1f);
+            colors[(int)ImGuiCol.Separator]          = new Vector4(0.25f, 0.25f, 0.35f, 1f);
+            colors[(int)ImGuiCol.Text]               = new Vector4(0.90f, 0.88f, 0.95f, 1f);
+            colors[(int)ImGuiCol.TextDisabled]       = new Vector4(0.50f, 0.48f, 0.55f, 1f);
         }
 
-        static void DrawCustomTitleBar()
-        {
-            float titleBarHeight = 40f;
-            float windowWidth = Raylib.GetScreenWidth();
-            float windowHeight = Raylib.GetScreenHeight();
-
-            ImGui.SetCursorPos(Vector2.Zero);
-            ImGui.BeginChild("titlebar", new Vector2(windowWidth, titleBarHeight), ImGuiChildFlags.None,
-                ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
-
-            var drawList = ImGui.GetWindowDrawList();
-            var windowPos = ImGui.GetWindowPos();
-
-            drawList.AddRectFilledMultiColor(
-                windowPos,
-                windowPos + new Vector2(windowWidth, titleBarHeight),
-                ImGui.GetColorU32(new Vector4(0.1f, 0.1f, 0.15f, 1f)),
-                ImGui.GetColorU32(new Vector4(0.1f, 0.1f, 0.15f, 1f)),
-                ImGui.GetColorU32(new Vector4(0.15f, 0.15f, 0.2f, 1f)),
-                ImGui.GetColorU32(new Vector4(0.15f, 0.15f, 0.2f, 1f))
-            );
-
-            ImGui.SetCursorPos(new Vector2(15, 12));
-            ImGui.Text("VRChat Unfriend Manager v3");
-
-            float buttonSize = 32f;
-            float totalButtonsWidth = (buttonSize + 8) * 3 - 8;
-            float buttonsStartX = windowWidth - totalButtonsWidth - 10;
-
-            ImGui.SetCursorPos(new Vector2(buttonsStartX, 4));
-            var minimizeHovered = ImGui.Button("-", new Vector2(buttonSize, buttonSize - 8));
-            if (minimizeHovered) Raylib.MinimizeWindow();
-
-            ImGui.SameLine();
-            string maximizeLabel = Raylib.IsWindowMaximized() ? "[-]" : "[O]";
-            var maximizeHovered = ImGui.Button(maximizeLabel, new Vector2(buttonSize, buttonSize - 8));
-            if (maximizeHovered)
-            {
-                if (Raylib.IsWindowMaximized()) Raylib.RestoreWindow();
-                else Raylib.MaximizeWindow();
-            }
-
-            ImGui.SameLine();
-            var closeHovered = ImGui.Button("X", new Vector2(buttonSize, buttonSize - 8));
-            if (closeHovered) shouldExit = true;
-
-            // Title bar drag logic
-            if (ImGui.IsMouseDown(ImGuiMouseButton.Left) &&
-                ImGui.IsWindowHovered() &&
-                !minimizeHovered && !maximizeHovered && !closeHovered &&
-                ImGui.GetMousePos().Y - windowPos.Y < titleBarHeight)
-            {
-                if (Raylib.IsWindowMaximized())
-                {
-                    Raylib.RestoreWindow();
-                    Raylib.SetWindowPosition((int)(ImGui.GetMousePos().X - Raylib.GetScreenWidth() * 0.3f), 10);
-                }
-
-                if (ImGui.IsMouseDragging(ImGuiMouseButton.Left, 5f))
-                {
-                    var delta = ImGui.GetMouseDragDelta(ImGuiMouseButton.Left);
-                    var pos = Raylib.GetWindowPosition();
-                    Raylib.SetWindowPosition((int)(pos.X + delta.X), (int)(pos.Y + delta.Y));
-                    ImGui.ResetMouseDragDelta(ImGuiMouseButton.Left);
-                }
-            }
-
-            ImGui.EndChild();
-            ImGui.SetCursorPos(new Vector2(0, titleBarHeight + 5));
-        }
-
+        // ─── Login Screen ──────────────────────────────────────────────────────────
         static void DrawLoginScreen()
         {
-            ImGui.Text("VRChat Unfriend Manager v3");
+            int sw = Raylib.GetScreenWidth();
+            int sh = Raylib.GetScreenHeight();
+            float formW = Math.Min(380f, sw * 0.85f);
+            float formH = 300f;
+            float ox = (sw - formW) * 0.5f;
+            float oy = (sh - formH) * 0.5f;
+
+            ImGui.SetCursorPos(new Vector2(ox, oy));
+            ImGui.BeginChild("##login_card", new Vector2(formW, formH), ImGuiChildFlags.Borders);
+
+            ImGui.Spacing();
+            float titleW = ImGui.CalcTextSize("VRChat Unfriend Manager").X;
+            ImGui.SetCursorPosX((formW - titleW) * 0.5f);
+            ImGui.TextColored(new Vector4(0.75f, 0.55f, 1f, 1f), "VRChat Unfriend Manager");
+            ImGui.Spacing();
             ImGui.Separator();
+            ImGui.Spacing();
 
-            ImGui.TextColored(
-                status.Contains("Login failed", StringComparison.OrdinalIgnoreCase) ||
-                status.Contains("Wrong", StringComparison.OrdinalIgnoreCase) ||
-                status.Contains("CSRF", StringComparison.OrdinalIgnoreCase) ||
-                status.Contains("cookie", StringComparison.OrdinalIgnoreCase)
-                    ? new Vector4(1f, 0.3f, 0.3f, 1f)
-                    : ImGui.GetStyle().Colors[(int)ImGuiCol.Text],
-                status
-            );
+            bool isSigningIn = status == "Signing in...";
+            bool isErr = !isSigningIn &&
+                         (status.Contains("fail", StringComparison.OrdinalIgnoreCase) ||
+                          status.Contains("wrong", StringComparison.OrdinalIgnoreCase) ||
+                          status.Contains("error", StringComparison.OrdinalIgnoreCase) ||
+                          status.Contains("expired", StringComparison.OrdinalIgnoreCase) ||
+                          status.Contains("cookie", StringComparison.OrdinalIgnoreCase));
 
-            ImGui.InputText("Username", ref user, 100);
-            ImGui.InputText("Password", ref pass, 100, ImGuiInputTextFlags.Password);
+            var statusColor = isSigningIn  ? new Vector4(0.7f, 0.7f, 0.3f, 1f)
+                            : isErr        ? new Vector4(1f,   0.3f, 0.3f, 1f)
+                            :                new Vector4(0.6f, 0.6f, 0.7f, 1f);
+
+            if (isSigningIn)
+            {
+                // Animated dots so the user knows something is happening
+                int dots = (int)(ImGui.GetTime() * 2) % 4;
+                ImGui.TextColored(statusColor, "Signing in" + new string('.', dots));
+            }
+            else
+            {
+                ImGui.TextColored(statusColor, status);
+            }
+
+            ImGui.Spacing();
+
+            // Pre-fill username from saved config if not already set
+            if (string.IsNullOrEmpty(user) && !string.IsNullOrEmpty(config.Username))
+                user = config.Username;
+
+            ImGui.SetNextItemWidth(formW - 24);
+            ImGui.InputText("##user", ref user, 100);
+            ImGui.SameLine(0, 0);
+            ImGui.TextDisabled(" Username");
+
+            ImGui.SetNextItemWidth(formW - 24);
+            ImGui.InputText("##pass", ref pass, 100, ImGuiInputTextFlags.Password);
+            ImGui.SameLine(0, 0);
+            ImGui.TextDisabled(" Password");
+
+            ImGui.Spacing();
             ImGui.Checkbox("Remember me", ref remember);
+            ImGui.Spacing();
 
-            ImGui.SameLine();
-            if (ImGui.Button("Login") && !working)
+            // Disable the button while auto-login is in progress or a manual login is running
+            bool canLogin = !working && !isSigningIn &&
+                            !string.IsNullOrWhiteSpace(user) &&
+                            !string.IsNullOrWhiteSpace(pass);
+
+            if (!canLogin) ImGui.BeginDisabled();
+            if (ImGui.Button(working || isSigningIn ? "Signing in..." : "Login",
+                new Vector2(formW - 24, 32)))
             {
                 working = true;
                 status = "Logging in...";
@@ -660,273 +1069,526 @@ namespace VRChatUnfriendManager
                     working = false;
                 });
             }
+            if (!canLogin) ImGui.EndDisabled();
+
+            ImGui.EndChild();
         }
 
+        // ─── Main UI ───────────────────────────────────────────────────────────────
         static void DrawMainUI()
         {
-            if (ImGui.BeginTabBar("Tabs"))
+            int sw = Raylib.GetScreenWidth();
+            int sh = Raylib.GetScreenHeight();
+
+            // Top bar: app name + logged-in info + logout
+            ImGui.TextColored(new Vector4(0.75f, 0.55f, 1f, 1f), "VRChat Unfriend Manager");
+            if (isLoggedIn)
             {
-                if (ImGui.BeginTabItem("Unfriend Manager"))
+                ImGui.SameLine();
+                ImGui.TextColored(new Vector4(0.4f, 0.9f, 0.5f, 1f), $"  •  {loggedInAs}");
+                ImGui.SameLine();
+                float logoutW = ImGui.CalcTextSize("Logout").X + 16;
+                ImGui.SetCursorPosX(sw - logoutW - ImGui.GetStyle().WindowPadding.X);
+                if (ImGui.Button("Logout"))
                 {
-                    ImGui.Text("VRChat Unfriend Manager v3");
-                    if (isLoggedIn)
-                    {
-                        ImGui.TextColored(new Vector4(0, 1, 0, 1), $"Logged in as: {loggedInAs}");
-                        if (ImGui.Button("Logout"))
-                        {
-                            File.Delete(Paths.CookieFile);
-                            config.Cookie = "";
-                            SaveConfig();
-                            api = new VRChatApiService();
-                            friends.Clear(); favorites.Clear(); selected.Clear();
-                            loggedInAs = ""; isLoggedIn = false; sessionRestored = false;
-                            status = "Logged out";
-                        }
-                    }
+                    File.Delete(Paths.CookieFile);
+                    config.Cookie = "";
+                    SaveConfig();
+                    api = new VRChatApiService();
+                    friends.Clear(); favorites.Clear(); selected.Clear();
+                    loggedInAs = ""; isLoggedIn = false; sessionRestored = false;
+                    status = "Logged out";
+                }
+            }
+            ImGui.Separator();
 
-                    if (isLoggedIn)
-                    {
-                        if (ImGui.Checkbox("Hide Favorites", ref hideFavs))
-                        {
-                            config.ExcludeFavorites = hideFavs;
-                            SaveConfig();
-                        }
-
-                        ImGui.AlignTextToFramePadding();
-                        if (ImGui.Checkbox("Inactive >=", ref inactiveOn))
-                        {
-                            config.InactiveEnabled = inactiveOn;
-                            SaveConfig();
-                        }
-
-                        if (inactiveOn)
-                        {
-                            ImGui.SameLine();
-                            float indent = ImGui.GetStyle().ItemSpacing.X + 15f;
-                            ImGui.SetCursorPosX(ImGui.GetCursorPosX() + indent);
-
-                            ImGui.SetNextItemWidth(60f);
-                            if (ImGui.InputInt("##inactive_val", ref inactiveVal))
-                            {
-                                if (inactiveVal < 1) inactiveVal = 1;
-                                config.InactiveValue = inactiveVal;
-                                SaveConfig();
-                            }
-
-                            ImGui.SameLine();
-                            ImGui.SetNextItemWidth(100f);
-                            if (ImGui.Combo("##unit", ref inactiveUnit, units, units.Length))
-                            {
-                                config.InactiveUnitIndex = inactiveUnit;
-                                SaveConfig();
-                            }
-
-                            ImGui.SameLine();
-                            ImGui.TextDisabled("|");
-                            ImGui.SameLine();
-
-                            var cutoff = inactiveUnit switch
-                            {
-                                0 => DateTime.UtcNow.AddDays(-inactiveVal),
-                                1 => DateTime.UtcNow.AddMonths(-inactiveVal),
-                                _ => DateTime.UtcNow.AddYears(-inactiveVal)
-                            };
-
-                            int matchCount = friends.Count(f =>
-                                string.IsNullOrEmpty(f.LastLogin) ||
-                                DateTime.Parse(f.LastLogin) < cutoff);
-
-                            if (hideFavs)
-                                matchCount = friends.Count(f =>
-                                    !favorites.Contains(f.Id) &&
-                                    (string.IsNullOrEmpty(f.LastLogin) || DateTime.Parse(f.LastLogin) < cutoff));
-
-                            ImGui.TextColored(new Vector4(0.3f, 1f, 0.3f, 1f), $"({matchCount} users match)");
-                        }
-
-                        ImGui.NewLine();
-
-                        ImGui.SetNextItemWidth(140f);
-                        if (ImGui.Combo("Sort", ref sort, sorts, sorts.Length))
-                        {
-                            config.SortOptionIndex = sort;
-                            SaveConfig();
-                        }
-
-                        ImGui.Separator();
-                        ImGui.Text(status);
-
-                        if (working && !isUnfriending) ImGui.ProgressBar(-1f, new Vector2(-1, 20), "");
-
-                        if (ImGui.BeginChild("list", new Vector2(0, -50), ImGuiChildFlags.Borders))
-                        {
-                            shown.Clear();
-                            var temp = friends.ToList();
-
-                            if (hideFavs) temp = temp.Where(f => !favorites.Contains(f.Id)).ToList();
-
-                            if (inactiveOn && inactiveVal > 0)
-                            {
-                                var cutoff = inactiveUnit switch
-                                {
-                                    0 => DateTime.UtcNow.AddDays(-inactiveVal),
-                                    1 => DateTime.UtcNow.AddMonths(-inactiveVal),
-                                    _ => DateTime.UtcNow.AddYears(-inactiveVal)
-                                };
-                                temp = temp.Where(f => string.IsNullOrEmpty(f.LastLogin) || DateTime.Parse(f.LastLogin) < cutoff).ToList();
-                            }
-
-                            temp = sort switch
-                            {
-                                0 => temp.OrderBy(f => string.IsNullOrEmpty(f.LastLogin) ? DateTime.MinValue : DateTime.Parse(f.LastLogin)).ToList(),
-                                1 => temp.OrderByDescending(f => string.IsNullOrEmpty(f.LastLogin) ? DateTime.MinValue : DateTime.Parse(f.LastLogin)).ToList(),
-                                2 => temp.OrderBy(f => f.DisplayName).ToList(),
-                                _ => temp.OrderByDescending(f => f.DisplayName).ToList()
-                            };
-
-                            shown = temp;
-
-                            for (int i = 0; i < shown.Count; i++)
-                            {
-                                var ago = string.IsNullOrEmpty(shown[i].LastLogin) ? "never" : Ago(DateTime.Parse(shown[i].LastLogin));
-                                bool sel = selected.Contains(i);
-                                if (ImGui.Selectable($"{shown[i].DisplayName,-40} {ago}", sel))
-                                {
-                                    if (Raylib.IsKeyDown(KeyboardKey.LeftControl))
-                                        _ = sel ? selected.Remove(i) : selected.Add(i);
-                                    else { selected.Clear(); selected.Add(i); }
-                                }
-                            }
-
-                            ImGui.EndChild();
-                        }
-
-                        if (ImGui.Button("Mark All")) { for (int i = 0; i < shown.Count; i++) selected.Add(i); }
-                        ImGui.SameLine(); if (ImGui.Button("Unmark All")) selected.Clear();
-                        ImGui.SameLine(); if (ImGui.Button("Refresh")) _ = Refresh();
-                        ImGui.SameLine(); if (ImGui.Button("Backup JSON")) File.WriteAllText($"backup_{DateTime.Now:yyyyMMdd_HHmmss}.json", JsonSerializer.Serialize(shown, new JsonSerializerOptions { WriteIndented = true }));
-
-                        string btn = isUnfriending ? (isPaused ? "Resume" : "Pause") : $"Unfriend Selected ({selected.Count})";
-                        if (ImGui.Button(btn) && selected.Count > 0)
-                        {
-                            if (isUnfriending) isPaused = !isPaused;
-                            else ImGui.OpenPopup("Confirm");
-                        }
-
-                        if (ImGui.BeginPopupModal("Confirm", ImGuiWindowFlags.AlwaysAutoResize))
-                        {
-                            ImGui.Text($"{selected.Count} users will be unfriended permanently.");
-                            if (ImGui.Button("Yes, do it")) { _ = Task.Run(StartUnfriendProcess); ImGui.CloseCurrentPopup(); }
-                            ImGui.SameLine();
-                            if (ImGui.Button("No")) ImGui.CloseCurrentPopup();
-                            ImGui.EndPopup();
-                        }
-
-                        if (isUnfriending)
-                        {
-                            float p = unfriendTotal > 0 ? unfriendDone / (float)unfriendTotal : 0f;
-                            ImGui.ProgressBar(p, new Vector2(-1, 35), $"{unfriendDone}/{unfriendTotal}");
-                            ImGui.TextColored(new Vector4(1, 0.8f, 0, 1), isPaused ? "PAUSED" : "Unfriending...");
-                            if (ImGui.Button("Cancel")) { unfriendCts?.Cancel(); isUnfriending = false; isPaused = false; }
-                        }
-                    }
-
+            if (ImGui.BeginTabBar("##tabs"))
+            {
+                if (ImGui.BeginTabItem("Friends"))
+                {
+                    DrawFriendsTab(sw, sh);
                     ImGui.EndTabItem();
                 }
-
+                if (ImGui.BeginTabItem("Groups"))
+                {
+                    DrawGroupsTab(sw, sh);
+                    ImGui.EndTabItem();
+                }
                 if (ImGui.BeginTabItem("Settings"))
                 {
-                    ImGui.Text("Application Settings");
-                    ImGui.Separator();
-
-                    ImGui.Text("Window Options:");
-                    bool useCustomTitleBar = config.UseCustomTitleBar;
-                    if (ImGui.Checkbox("Use custom title bar (requires restart)", ref useCustomTitleBar))
-                    {
-                        config.UseCustomTitleBar = useCustomTitleBar;
-                        SaveConfig();
-                        ShowToast("VRChat Unfriend Manager", "Restart application for changes to take effect");
-                    }
-
-                    ImGui.Text("Startup Options:");
-                    bool runOnStartup = config.RunOnStartup;
-                    if (ImGui.Checkbox("Run on system startup", ref runOnStartup))
-                    {
-                        config.RunOnStartup = runOnStartup;
-                        SaveConfig();
-                        UpdateStartup(runOnStartup);
-                    }
-
-                    // --- VRCX INTEGRATION ---
-                    if (Directory.Exists(Paths.VrcxStartup))
-                    {
-                        ImGui.Separator();
-                        ImGui.Text("VRCX Integration");
-                        ImGui.TextDisabled("Detected VRCX startup folder.");
-                        
-                        bool vrcxDesktop = config.VrcxStartupDesktop;
-                        if (ImGui.Checkbox("Launch with VRCX (Desktop)", ref vrcxDesktop))
-                        {
-                            config.VrcxStartupDesktop = vrcxDesktop;
-                            UpdateVrcxShortcut("desktop", vrcxDesktop);
-                            SaveConfig();
-                        }
-                        
-                        bool vrcxVr = config.VrcxStartupVr;
-                        if (ImGui.Checkbox("Launch with VRCX (VR)", ref vrcxVr))
-                        {
-                            config.VrcxStartupVr = vrcxVr;
-                            UpdateVrcxShortcut("vr", vrcxVr);
-                            SaveConfig();
-                        }
-                    }
-                    // ------------------------
-
-                    ImGui.Separator();
-                    ImGui.Text("Auto-Unfriend Scheduler");
-                    ImGui.Separator();
-
-                    bool autoEnabled = config.AutoUnfriendEnabled;
-                    if (ImGui.Checkbox("Enable Auto-Unfriend", ref autoEnabled))
-                    {
-                        config.AutoUnfriendEnabled = autoEnabled;
-                        SaveConfig();
-                        if (autoEnabled) StartAutoScheduler();
-                        else autoCts?.Cancel();
-                    }
-
-                    ImGui.BeginDisabled(!config.AutoUnfriendEnabled);
-                    // (Time picker logic kept same as original, omitted for brevity but should be here)
-                    ImGui.Text($"Scheduled for: {config.AutoUnfriendHour:D2}:{config.AutoUnfriendMinute:D2}");
-                    ImGui.EndDisabled();
-
+                    DrawSettingsTab();
                     ImGui.EndTabItem();
                 }
-
                 ImGui.EndTabBar();
             }
         }
 
-        static async Task Refresh()
+        // ─── Friends Tab ───────────────────────────────────────────────────────────
+        static void DrawFriendsTab(int sw, int sh)
         {
-            working = true; status = "Loading friends...";
-            try
+            ImGui.Spacing();
+            if (ImGui.Checkbox("Hide Favorites", ref hideFavs))
             {
-                favorites = await api.GetFavoriteFriendIdsAsync();
-                friends = await api.GetAllFriendsAsync();
-                status = $"Loaded {friends.Count} friends";
+                config.ExcludeFavorites = hideFavs;
+                SaveConfig();
             }
-            catch (Exception ex)
+
+            ImGui.SameLine(0, 20);
+            if (ImGui.Checkbox("Inactive >=", ref inactiveOn))
             {
-                status = "Session expired - please re-login";
-                isLoggedIn = false;
-                sessionRestored = false;
-                Console.WriteLine(ex.Message);
+                config.InactiveEnabled = inactiveOn;
+                SaveConfig();
             }
-            selected.Clear();
-            working = false;
+
+            if (inactiveOn)
+            {
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(60f);
+                if (ImGui.InputInt("##iv", ref inactiveVal))
+                {
+                    if (inactiveVal < 1) inactiveVal = 1;
+                    config.InactiveValue = inactiveVal;
+                    SaveConfig();
+                }
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(90f);
+                if (ImGui.Combo("##iu", ref inactiveUnit, units, units.Length))
+                {
+                    config.InactiveUnitIndex = inactiveUnit;
+                    SaveConfig();
+                }
+                ImGui.SameLine();
+                var cutoff = inactiveUnit switch
+                {
+                    0 => DateTime.UtcNow.AddDays(-inactiveVal),
+                    1 => DateTime.UtcNow.AddMonths(-inactiveVal),
+                    _ => DateTime.UtcNow.AddYears(-inactiveVal)
+                };
+                int matchCount = friends.Count(f =>
+                    (!hideFavs || !favorites.Contains(f.Id)) &&
+                    (string.IsNullOrEmpty(f.LastLogin) || DateTime.Parse(f.LastLogin) < cutoff));
+                ImGui.TextColored(new Vector4(0.4f, 0.9f, 0.5f, 1f), $"({matchCount} match)");
+            }
+
+            // VRChat native favorite group filter chips
+            if (favByGroup.Count > 0)
+            {
+                ImGui.Spacing();
+                ImGui.TextDisabled("Exclude groups:");
+                ImGui.SameLine();
+                foreach (var tag in favByGroup.Keys.OrderBy(t => t))
+                {
+                    bool excluded = config.ExcludedFavGroups.Contains(tag);
+                    string label = favGroupNames.TryGetValue(tag, out var n) ? n : tag;
+                    int count = favByGroup[tag].Count;
+                    if (ImGui.Checkbox($"##{tag}_excl", ref excluded))
+                    {
+                        if (excluded) { if (!config.ExcludedFavGroups.Contains(tag)) config.ExcludedFavGroups.Add(tag); }
+                        else config.ExcludedFavGroups.Remove(tag);
+                        SaveConfig();
+                    }
+                    ImGui.SameLine();
+                    ImGui.Text($"{label} ({count})");
+                    ImGui.SameLine(0, 14);
+                }
+                ImGui.NewLine();
+            }
+
+            ImGui.Spacing();
+            ImGui.SetNextItemWidth(160f);
+            if (ImGui.Combo("Sort", ref sort, sorts, sorts.Length))
+            {
+                config.SortOptionIndex = sort;
+                SaveConfig();
+            }
+
+            ImGui.Separator();
+
+            ImGui.TextColored(new Vector4(0.6f, 0.6f, 0.7f, 1f), status);
+            if (working && !isUnfriending)
+                ImGui.ProgressBar(-1f * (float)(ImGui.GetTime() % 1.0), new Vector2(-1, 6), "");
+
+            // Compute excluded IDs from selected native groups
+            var excludedIds = new HashSet<string>();
+            foreach (var tag in config.ExcludedFavGroups)
+                if (favByGroup.TryGetValue(tag, out var ids))
+                    foreach (var id in ids) excludedIds.Add(id);
+
+            // Build shown list
+            shown.Clear();
+            var temp = friends.ToList();
+            if (hideFavs) temp = temp.Where(f => !favorites.Contains(f.Id)).ToList();
+            if (excludedIds.Count > 0) temp = temp.Where(f => !excludedIds.Contains(f.Id)).ToList();
+            if (inactiveOn && inactiveVal > 0)
+            {
+                var cutoff = inactiveUnit switch
+                {
+                    0 => DateTime.UtcNow.AddDays(-inactiveVal),
+                    1 => DateTime.UtcNow.AddMonths(-inactiveVal),
+                    _ => DateTime.UtcNow.AddYears(-inactiveVal)
+                };
+                temp = temp.Where(f => string.IsNullOrEmpty(f.LastLogin) || DateTime.Parse(f.LastLogin) < cutoff).ToList();
+            }
+            temp = sort switch
+            {
+                0 => temp.OrderBy(f => string.IsNullOrEmpty(f.LastLogin) ? DateTime.MinValue : DateTime.Parse(f.LastLogin)).ToList(),
+                1 => temp.OrderByDescending(f => string.IsNullOrEmpty(f.LastLogin) ? DateTime.MinValue : DateTime.Parse(f.LastLogin)).ToList(),
+                2 => temp.OrderBy(f => f.DisplayName).ToList(),
+                3 => temp.OrderByDescending(f => f.DisplayName).ToList(),
+                4 => temp.OrderByDescending(f => f.TimeSpentMs).ToList(),
+                _ => temp.OrderBy(f => f.TimeSpentMs).ToList()
+            };
+            shown = temp;
+
+            // List height fills remaining space
+            float bottomBarH = isUnfriending ? 90f : 50f;
+            float listH = sh - ImGui.GetCursorPosY() - bottomBarH - ImGui.GetStyle().WindowPadding.Y * 2 - 60;
+            if (listH < 80) listH = 80;
+
+            if (ImGui.BeginChild("##list", new Vector2(-1, listH), ImGuiChildFlags.Borders))
+            {
+                // Header row
+                ImGui.TextDisabled($"{"  ",-5}{"Name",-36} {"Last seen",8}  {"Together",9}  Group");
+                ImGui.Separator();
+
+                const float IMG_SIZE = 32f;
+                const float ROW_H = IMG_SIZE + 4f;
+
+                for (int i = 0; i < shown.Count; i++)
+                {
+                    var f = shown[i];
+                    var ago = string.IsNullOrEmpty(f.LastLogin) ? "never" : Ago(DateTime.Parse(f.LastLogin));
+                    var together = FormatTimeSpent(f.TimeSpentMs);
+                    bool sel = selected.Contains(i);
+
+                    string groupLabel = "";
+                    foreach (var (tag, ids) in favByGroup)
+                        if (ids.Contains(f.Id))
+                        {
+                            groupLabel = favGroupNames.TryGetValue(tag, out var gn) ? gn : tag;
+                            break;
+                        }
+
+                    // Reserve full-row height for the image + text to coexist
+                    ImGui.PushID(i);
+                    var rowStart = ImGui.GetCursorScreenPos();
+
+                    // Transparent selectable spanning the full row height
+                    if (ImGui.Selectable($"##s{i}", sel,
+                        ImGuiSelectableFlags.SpanAllColumns | ImGuiSelectableFlags.AllowOverlap,
+                        new Vector2(0, ROW_H)))
+                    {
+                        if (Raylib.IsKeyDown(KeyboardKey.LeftControl))
+                            _ = sel ? selected.Remove(i) : selected.Add(i);
+                        else { selected.Clear(); selected.Add(i); }
+                    }
+
+                    // Draw thumbnail overlaid on the selectable
+                    ImGui.SetCursorScreenPos(rowStart);
+                    var tex = TextureCache.RequestTexture(f.ThumbnailUrl);
+                    if (tex.HasValue && tex.Value.Id != 0)
+                    {
+                        ImGui.Image((nint)tex.Value.Id, new Vector2(IMG_SIZE, IMG_SIZE));
+                    }
+                    else
+                    {
+                        // Placeholder coloured square while loading
+                        var dl = ImGui.GetWindowDrawList();
+                        dl.AddRectFilled(rowStart, rowStart + new Vector2(IMG_SIZE, IMG_SIZE),
+                            ImGui.GetColorU32(new Vector4(0.2f, 0.2f, 0.3f, 1f)));
+                        dl.AddText(rowStart + new Vector2(8, 8),
+                            ImGui.GetColorU32(new Vector4(0.5f, 0.5f, 0.6f, 1f)), "?");
+                    }
+
+                    // Text to the right of the thumbnail, vertically centred
+                    ImGui.SameLine();
+                    float textY = rowStart.Y + (ROW_H - ImGui.GetTextLineHeight()) * 0.5f;
+                    ImGui.SetCursorScreenPos(new Vector2(ImGui.GetCursorScreenPos().X, textY));
+                    ImGui.Text($"{f.DisplayName,-34} {ago,8}  {together,9}  {groupLabel}");
+
+                    ImGui.PopID();
+                }
+                ImGui.EndChild();
+            }
+
+            // Bottom action bar
+            ImGui.Spacing();
+            if (ImGui.Button("Mark All")) { for (int i = 0; i < shown.Count; i++) selected.Add(i); }
+            ImGui.SameLine();
+            if (ImGui.Button("Unmark All")) selected.Clear();
+            ImGui.SameLine();
+            if (ImGui.Button("Refresh")) _ = Refresh();
+            ImGui.SameLine();
+            if (ImGui.Button("Backup JSON"))
+                File.WriteAllText($"backup_{DateTime.Now:yyyyMMdd_HHmmss}.json",
+                    JsonSerializer.Serialize(shown, new JsonSerializerOptions { WriteIndented = true }));
+
+            ImGui.SameLine();
+            string btnLabel = isUnfriending ? (isPaused ? "Resume" : "Pause") : $"Unfriend ({selected.Count})";
+            bool canUnfriend = selected.Count > 0 || isUnfriending;
+            if (!canUnfriend) ImGui.BeginDisabled();
+            if (ImGui.Button(btnLabel))
+            {
+                if (isUnfriending) isPaused = !isPaused;
+                else if (selected.Count > 0) ImGui.OpenPopup("##confirm_unfriend");
+            }
+            if (!canUnfriend) ImGui.EndDisabled();
+
+            if (ImGui.BeginPopupModal("##confirm_unfriend", ImGuiWindowFlags.AlwaysAutoResize))
+            {
+                ImGui.Text($"Permanently unfriend {selected.Count} user(s)?");
+                ImGui.Spacing();
+                if (ImGui.Button("Yes, do it", new Vector2(120, 0)))
+                {
+                    _ = Task.Run(StartUnfriendProcess);
+                    ImGui.CloseCurrentPopup();
+                }
+                ImGui.SameLine();
+                if (ImGui.Button("Cancel", new Vector2(80, 0))) ImGui.CloseCurrentPopup();
+                ImGui.EndPopup();
+            }
+
+            if (isUnfriending)
+            {
+                ImGui.Spacing();
+                float p = unfriendTotal > 0 ? unfriendDone / (float)unfriendTotal : 0f;
+                ImGui.ProgressBar(p, new Vector2(-1, 20), $"{unfriendDone}/{unfriendTotal}");
+                ImGui.TextColored(new Vector4(1f, 0.8f, 0.2f, 1f), isPaused ? "PAUSED" : "Unfriending...");
+                ImGui.SameLine();
+                if (ImGui.Button("Cancel")) { unfriendCts?.Cancel(); isUnfriending = false; isPaused = false; }
+            }
         }
 
+        // ─── Groups Tab ────────────────────────────────────────────────────────────
+        static void DrawGroupsTab(int sw, int sh)
+        {
+            ImGui.Spacing();
+            ImGui.TextWrapped("These are your VRChat native favorite groups. Membership is managed inside VRChat. Use the toggles to exclude a group from the Friends list.");
+            ImGui.Spacing();
+
+            if (ImGui.Button("Refresh Groups")) _ = Refresh();
+            ImGui.SameLine();
+            // Show debug info about what tags came back
+            ImGui.TextDisabled($"  {favByGroup.Count} group(s) detected, {favGroupNames.Count} named");
+            ImGui.Separator();
+            ImGui.Spacing();
+
+            if (favByGroup.Count == 0)
+            {
+                ImGui.TextColored(new Vector4(1f, 0.6f, 0.3f, 1f), "No favorite groups found.");
+                ImGui.Spacing();
+                ImGui.TextDisabled("This could mean:");
+                ImGui.TextDisabled("  • You have no friends added to favorites in VRChat");
+                ImGui.TextDisabled("  • The API didn't return group tags (check console for [FAV] logs)");
+                ImGui.TextDisabled("  • CurrentUserId was not set before the groups call");
+                ImGui.Spacing();
+                ImGui.TextDisabled($"CurrentUserId: {(string.IsNullOrEmpty(api.CurrentUserId) ? "(not set!)" : api.CurrentUserId)}");
+                return;
+            }
+
+            float colW = Math.Max((sw - 50f) / Math.Max(favByGroup.Count, 1), 180f);
+
+            foreach (var tag in favByGroup.Keys.OrderBy(t => t))
+            {
+                var ids = favByGroup[tag];
+                string displayName = favGroupNames.TryGetValue(tag, out var n) ? n : tag;
+                bool excluded = config.ExcludedFavGroups.Contains(tag);
+
+                ImGui.BeginGroup();
+
+                // Show both display name and raw tag so we can verify the mapping
+                ImGui.TextColored(new Vector4(0.75f, 0.55f, 1f, 1f), displayName);
+                ImGui.SameLine();
+                ImGui.TextDisabled($"[{tag}] ({ids.Count})");
+                ImGui.SameLine();
+                if (ImGui.Checkbox($"Exclude##{tag}", ref excluded))
+                {
+                    if (excluded) { if (!config.ExcludedFavGroups.Contains(tag)) config.ExcludedFavGroups.Add(tag); }
+                    else config.ExcludedFavGroups.Remove(tag);
+                    SaveConfig();
+                }
+
+                float cardH = Math.Min(ids.Count * (ImGui.GetTextLineHeightWithSpacing() + 6) + 12, sh * 0.5f);
+                if (ImGui.BeginChild($"##grp_{tag}", new Vector2(colW, cardH), ImGuiChildFlags.Borders))
+                {
+                    foreach (var id in ids)
+                    {
+                        var f = friends.FirstOrDefault(x => x.Id == id);
+                        if (f != null)
+                        {
+                            var tex = TextureCache.RequestTexture(f.ThumbnailUrl);
+                            if (tex.HasValue && tex.Value.Id != 0)
+                                ImGui.Image((nint)tex.Value.Id, new Vector2(24, 24));
+                            else
+                                ImGui.Dummy(new Vector2(24, 24));
+                            ImGui.SameLine();
+                            ImGui.Text(f.DisplayName);
+                            ImGui.SameLine();
+                            ImGui.TextDisabled($"  {FormatTimeSpent(f.TimeSpentMs)}");
+                        }
+                        else
+                        {
+                            ImGui.TextDisabled(id);
+                        }
+                    }
+                    ImGui.EndChild();
+                }
+
+                ImGui.EndGroup();
+                ImGui.SameLine(0, 12);
+            }
+            ImGui.NewLine();
+        }
+
+        // ─── Settings Tab ──────────────────────────────────────────────────────────
+        static void DrawSettingsTab()
+        {
+            ImGui.Spacing();
+            ImGui.Text("Startup Options");
+            ImGui.Separator();
+
+            bool runOnStartup = config.RunOnStartup;
+            if (ImGui.Checkbox("Run on system startup", ref runOnStartup))
+            {
+                config.RunOnStartup = runOnStartup;
+                SaveConfig();
+                UpdateStartup(runOnStartup);
+            }
+
+            if (Directory.Exists(Paths.VrcxStartup))
+            {
+                ImGui.Spacing();
+                ImGui.Text("VRCX Integration");
+                if (VrcxDataService.IsAvailable)
+                    ImGui.TextColored(new Vector4(0.4f, 0.9f, 0.5f, 1f), "✓ VRCX database found — time together data enabled");
+                else
+                    ImGui.TextColored(new Vector4(1f, 0.6f, 0.3f, 1f), "VRCX.sqlite3 not found — time together will show as '-'");
+                ImGui.TextDisabled("  Requires NuGet: Microsoft.Data.Sqlite");
+
+                bool vrcxDesktop = config.VrcxStartupDesktop;
+                if (ImGui.Checkbox("Launch with VRCX (Desktop)", ref vrcxDesktop))
+                {
+                    config.VrcxStartupDesktop = vrcxDesktop;
+                    UpdateVrcxShortcut("desktop", vrcxDesktop);
+                    SaveConfig();
+                }
+
+                bool vrcxVr = config.VrcxStartupVr;
+                if (ImGui.Checkbox("Launch with VRCX (VR)", ref vrcxVr))
+                {
+                    config.VrcxStartupVr = vrcxVr;
+                    UpdateVrcxShortcut("vr", vrcxVr);
+                    SaveConfig();
+                }
+            }
+
+            ImGui.Spacing();
+            ImGui.Text("Auto-Unfriend Scheduler");
+            ImGui.Separator();
+
+            bool autoEnabled = config.AutoUnfriendEnabled;
+            if (ImGui.Checkbox("Enable Auto-Unfriend", ref autoEnabled))
+            {
+                config.AutoUnfriendEnabled = autoEnabled;
+                SaveConfig();
+                if (autoEnabled) StartAutoScheduler();
+                else { autoCts?.Cancel(); autoCts = null; }
+            }
+
+            if (config.AutoUnfriendEnabled)
+            {
+                ImGui.Spacing();
+                ImGui.Text("Schedule time:");
+                ImGui.SameLine();
+
+                int h = config.AutoUnfriendHour;
+                int m = config.AutoUnfriendMinute;
+                ImGui.SetNextItemWidth(55);
+                if (ImGui.InputInt("##ah", ref h)) { h = Math.Clamp(h, 0, 23); config.AutoUnfriendHour = h; SaveConfig(); StartAutoScheduler(); }
+                ImGui.SameLine(); ImGui.Text(":");
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(55);
+                if (ImGui.InputInt("##am", ref m)) { m = Math.Clamp(m, 0, 59); config.AutoUnfriendMinute = m; SaveConfig(); StartAutoScheduler(); }
+
+                ImGui.Spacing();
+                ImGui.Text("Mode:");
+                ImGui.SameLine();
+                int mode = config.AutoUnfriendMode;
+                ImGui.SetNextItemWidth(230);
+                if (ImGui.Combo("##automode", ref mode, autoModes, autoModes.Length))
+                {
+                    config.AutoUnfriendMode = mode;
+                    SaveConfig();
+                }
+
+                // Show next scheduled run
+                var now = DateTime.Now;
+                var target = new DateTime(now.Year, now.Month, now.Day, config.AutoUnfriendHour, config.AutoUnfriendMinute, 0);
+                if (target <= now) target = target.AddDays(1);
+                ImGui.Spacing();
+                ImGui.TextColored(new Vector4(0.4f, 0.9f, 0.5f, 1f), $"Next run: {target:ddd dd MMM yyyy HH:mm}");
+            }
+        }
+
+        // ─── Auto Scheduler ────────────────────────────────────────────────────────
+        static void StartAutoScheduler()
+        {
+            autoCts?.Cancel();
+            autoCts = new CancellationTokenSource();
+            var token = autoCts.Token;
+
+            _ = Task.Run(async () =>
+            {
+                while (!token.IsCancellationRequested && config.AutoUnfriendEnabled)
+                {
+                    var now = DateTime.Now;
+                    var target = new DateTime(now.Year, now.Month, now.Day, config.AutoUnfriendHour, config.AutoUnfriendMinute, 0);
+                    if (target <= now) target = target.AddDays(1);
+
+                    try { await Task.Delay(target - now, token); }
+                    catch (OperationCanceledException) { break; }
+
+                    if (token.IsCancellationRequested) break;
+
+                    // Refresh data then run auto-unfriend
+                    try
+                    {
+                        await Refresh();
+
+                        List<SafeLimitedUserFriend> toUnfriend = config.AutoUnfriendMode switch
+                        {
+                            // Inactive Only: 3+ months
+                            0 => shown.Where(f =>
+                                string.IsNullOrEmpty(f.LastLogin) ||
+                                DateTime.Parse(f.LastLogin) < DateTime.UtcNow.AddMonths(-3)).ToList(),
+                            // All Shown
+                            1 => shown.ToList(),
+                            // Marked Only (use current selection)
+                            2 => selected.Select(i => shown[i]).ToList(),
+                            _ => new List<SafeLimitedUserFriend>()
+                        };
+
+                        foreach (var u in toUnfriend)
+                        {
+                            if (token.IsCancellationRequested) break;
+                            try
+                            {
+                                await api.UnfriendAsync(u.Id);
+                                ShowUnfriendToast(u.DisplayName);
+                                await Task.Delay(Random.Shared.Next(7000, 13000), token);
+                            }
+                            catch { }
+                        }
+
+                        ShowToast("Auto-Unfriend", $"Removed {toUnfriend.Count} friends");
+                        await Refresh();
+                    }
+                    catch { }
+                }
+            }, token);
+        }
+
+        // ─── Unfriend Process ──────────────────────────────────────────────────────
         static async Task StartUnfriendProcess()
         {
             isUnfriending = true; isPaused = false;
@@ -943,13 +1605,13 @@ namespace VRChatUnfriendManager
 
                     if (unfriendCts.Token.IsCancellationRequested) break;
 
-                    var user = list[i];
-                    status = $"Unfriending {user.DisplayName}...";
+                    var u = list[i];
+                    status = $"Unfriending {u.DisplayName}...";
                     try
                     {
-                        await api.UnfriendAsync(user.Id);
+                        await api.UnfriendAsync(u.Id);
                         unfriendDone++;
-                        ShowUnfriendToast(user.DisplayName);
+                        ShowUnfriendToast(u.DisplayName);
                     }
                     catch (Exception ex) { Console.WriteLine(ex.Message); }
 
@@ -967,26 +1629,45 @@ namespace VRChatUnfriendManager
             }
         }
 
-        static void StartAutoScheduler()
+        // ─── Refresh ───────────────────────────────────────────────────────────────
+        static async Task Refresh()
         {
-            autoCts?.Cancel();
-            autoCts = new CancellationTokenSource();
-
-            _ = Task.Run(async () =>
+            working = true; status = "Loading friends...";
+            // Clear stale image cache so new friend list gets fresh thumbnails
+            TextureCache.UnloadAll();
+            try
             {
-                while (!autoCts.IsCancellationRequested && config.AutoUnfriendEnabled)
-                {
-                    var now = DateTime.Now;
-                    var target = new DateTime(now.Year, now.Month, now.Day, config.AutoUnfriendHour, config.AutoUnfriendMinute, 0);
-                    if (target <= now) target = target.AddDays(1);
+                var (allIds, byGroup) = await api.GetFavoritesDetailedAsync();
+                favorites = allIds;
+                favByGroup = byGroup;
+                favGroupNames = await api.GetFavoriteGroupNamesAsync();
+                friends = await api.GetAllFriendsAsync();
 
-                    var delay = target - now;
-                    if (delay > TimeSpan.Zero) await Task.Delay(delay, autoCts.Token);
-                    // Run Auto Unfriend Logic here
+                // Enrich with VRCX time-together data if available
+                if (VrcxDataService.IsAvailable)
+                {
+                    status = "Loading VRCX time data...";
+                    var timeMap = await Task.Run(() => VrcxDataService.LoadTimeSpentSeconds());
+                    foreach (var f in friends)
+                        if (timeMap.TryGetValue(f.Id, out var secs))
+                            f.TimeSpentMs = secs * 1000L;
                 }
-            });
+
+                status = $"Loaded {friends.Count} friends" +
+                         (VrcxDataService.IsAvailable ? " (with time data)" : "");
+            }
+            catch (Exception ex)
+            {
+                status = "Session expired — please re-login";
+                isLoggedIn = false;
+                sessionRestored = false;
+                Console.WriteLine(ex.Message);
+            }
+            selected.Clear();
+            working = false;
         }
 
+        // ─── Helpers ───────────────────────────────────────────────────────────────
         static string Ago(DateTime dt)
         {
             var span = DateTime.UtcNow - dt.ToUniversalTime();
@@ -996,103 +1677,81 @@ namespace VRChatUnfriendManager
             return $"{(int)(span.TotalDays / 365.25)}y";
         }
 
+        /// <summary>Formats milliseconds into a compact human-readable string, e.g. "9h 51m" or "2d 3h".</summary>
+        static string FormatTimeSpent(long ms)
+        {
+            if (ms <= 0) return "-";
+            var ts = TimeSpan.FromMilliseconds(ms);
+            if (ts.TotalDays >= 1) return $"{(int)ts.TotalDays}d {ts.Hours}h";
+            if (ts.TotalHours >= 1) return $"{(int)ts.TotalHours}h {ts.Minutes}m";
+            return $"{ts.Minutes}m";
+        }
+
+        static void ShowUnfriendToast(string displayName) =>
+            ShowToast("Unfriended", $"{displayName} has been removed.");
+
         static void ShowToast(string title, string msg)
         {
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
-                // Windows toast code
+                // Windows toast notification (add win32 notification library if desired)
             }
             else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
             {
-                try
-                {
-                    Process.Start("notify-send", $"\"{title}\" \"{msg}\"");
-                }
-                catch { }
+                try { Process.Start("notify-send", $"\"{title}\" \"{msg}\""); } catch { }
             }
         }
 
-        private static void UpdateStartup(bool enable)
+        static void UpdateStartup(bool enable)
         {
             var exePath = Process.GetCurrentProcess().MainModule?.FileName;
             if (string.IsNullOrEmpty(exePath)) return;
-
-            // ADD THE ARGUMENT HERE
             string cmdArgs = $"\"{exePath}\" --autostart";
 
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
-                try 
+                try
                 {
-                    // Requires: using Microsoft.Win32;
                     using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run", true);
                     if (enable) key?.SetValue("VRChatUnfriendManager", cmdArgs);
                     else key?.DeleteValue("VRChatUnfriendManager", false);
                 }
-                catch (Exception ex) { Console.WriteLine($"[STARTUP] Windows Failed: {ex.Message}"); }
+                catch (Exception ex) { Console.WriteLine($"[STARTUP] Windows: {ex.Message}"); }
             }
             else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
             {
                 try
                 {
                     string autostartDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "autostart");
-                    if (!Directory.Exists(autostartDir)) Directory.CreateDirectory(autostartDir);
-            
+                    Directory.CreateDirectory(autostartDir);
                     string desktopFile = Path.Combine(autostartDir, "VRChatUnfriendManager.desktop");
-            
                     if (enable)
-                    {
-                        string content = $"""
-                                          [Desktop Entry]
-                                          Type=Application
-                                          Name=VRChat Unfriend Manager
-                                          Exec={cmdArgs}
-                                          Terminal=false
-                                          """;
-                        File.WriteAllText(desktopFile, content);
-                    }
-                    else
-                    {
-                        if (File.Exists(desktopFile)) File.Delete(desktopFile);
-                    }
+                        File.WriteAllText(desktopFile, $"[Desktop Entry]\nType=Application\nName=VRChat Unfriend Manager\nExec={cmdArgs}\nTerminal=false\n");
+                    else if (File.Exists(desktopFile))
+                        File.Delete(desktopFile);
                 }
-                catch (Exception ex) { Console.WriteLine($"[STARTUP] Linux Failed: {ex.Message}"); }
+                catch (Exception ex) { Console.WriteLine($"[STARTUP] Linux: {ex.Message}"); }
             }
         }
-        
-        private static void UpdateVrcxShortcut(string subfolder, bool enable)
+
+        static void UpdateVrcxShortcut(string subfolder, bool enable)
         {
             try
             {
                 var targetDir = Path.Combine(Paths.VrcxStartup, subfolder);
-                if (!Directory.Exists(targetDir)) Directory.CreateDirectory(targetDir);
-
+                Directory.CreateDirectory(targetDir);
                 var exePath = Process.GetCurrentProcess().MainModule?.FileName;
                 if (string.IsNullOrEmpty(exePath)) return;
 
-                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
                 {
-                    // Windows PowerShell shortcut logic
-                }
-                else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-                {
-                    // Use Symlinks on Linux
                     string linkPath = Path.Combine(targetDir, "VRChatUnfriendManager");
-                    if (enable)
-                    {
-                        if (File.Exists(linkPath)) File.Delete(linkPath);
-                        File.CreateSymbolicLink(linkPath, exePath);
-                    }
-                    else
-                    {
-                        if (File.Exists(linkPath)) File.Delete(linkPath);
-                    }
+                    if (File.Exists(linkPath)) File.Delete(linkPath);
+                    if (enable) File.CreateSymbolicLink(linkPath, exePath);
                 }
+                // Windows: add .lnk shortcut via PowerShell if needed
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[VRCX] Failed to update shortcut: {ex.Message}");
-            }
+            catch (Exception ex) { Console.WriteLine($"[VRCX] {ex.Message}"); }
         }
 
         static void LoadConfig()
@@ -1111,8 +1770,17 @@ namespace VRChatUnfriendManager
         public static void SaveConfig()
         {
             Paths.EnsureExists();
-            config.Username = user;
-            config.EncodedPassword = remember ? Convert.ToBase64String(Encoding.UTF8.GetBytes(pass)) : "";
+
+            // Only update credentials fields if we actually have values — never blank them on shutdown
+            // (pass is empty after a session-restore login since we never store it in the field)
+            if (!string.IsNullOrEmpty(user))
+                config.Username = user;
+
+            if (remember && !string.IsNullOrEmpty(pass))
+                config.EncodedPassword = Convert.ToBase64String(Encoding.UTF8.GetBytes(pass));
+            else if (!remember)
+                config.EncodedPassword = ""; // explicit opt-out
+
             config.RememberMe = remember;
             config.ExcludeFavorites = hideFavs;
             config.InactiveEnabled = inactiveOn;
@@ -1121,7 +1789,8 @@ namespace VRChatUnfriendManager
             config.SortOptionIndex = sort;
             try
             {
-                File.WriteAllText(Paths.ConfigFile, JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }));
+                File.WriteAllText(Paths.ConfigFile,
+                    JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }));
             }
             catch { }
         }
