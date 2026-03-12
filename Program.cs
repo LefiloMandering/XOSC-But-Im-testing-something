@@ -51,6 +51,12 @@ namespace Unfriendmaxxing
         public bool InactiveEnabled { get; set; } = false;
         public int InactiveValue { get; set; } = 3;
         public int InactiveUnitIndex { get; set; } = 1;
+        /// <summary>Filter: only show friends with less than this many minutes together (0 = disabled).</summary>
+        public bool TogetherFilterEnabled { get; set; } = false;
+        /// <summary>Max together time value for the filter.</summary>
+        public int TogetherFilterValue { get; set; } = 60;
+        /// <summary>Unit: 0=Minutes, 1=Hours, 2=Days</summary>
+        public int TogetherFilterUnit { get; set; } = 1;
         public int SortOptionIndex { get; set; } = 0;
         public bool AutoUnfriendEnabled { get; set; } = false;
         public int AutoUnfriendHour { get; set; } = 3;
@@ -59,10 +65,6 @@ namespace Unfriendmaxxing
         public bool RunOnStartup { get; set; } = false;
         public bool VrcxStartupDesktop { get; set; } = false;
         public bool VrcxStartupVr { get; set; } = false;
-        /// <summary>
-        /// VRChat native favorite group tags to exclude from the list (e.g. "group_0", "group_1").
-        /// The display names are fetched live from the API and stored in favGroupNames at runtime.
-        /// </summary>
         public List<string> ExcludedFavGroups { get; set; } = new();
     }
 
@@ -405,6 +407,9 @@ namespace Unfriendmaxxing
             var allIds  = new HashSet<string>();
             var byGroup = new Dictionary<string, HashSet<string>>();
 
+            // Pre-seed all four slots so empty groups (0 members) still show in the UI
+            for (int i = 0; i < 4; i++) byGroup[$"group_{i}"] = new HashSet<string>();
+
             for (int offset = 0; ; offset += 100)
             {
                 var page = await Favorites.GetFavoritesAsync(type: "friend", n: 100, offset: offset);
@@ -412,7 +417,6 @@ namespace Unfriendmaxxing
                 foreach (var f in page)
                 {
                     allIds.Add(f.FavoriteId);
-                    // Tags[0] is the group tag e.g. "group_0"
                     var tag = f.Tags?.FirstOrDefault() ?? "group_0";
                     Console.WriteLine($"[FAV]   id={f.FavoriteId} tag={tag}");
                     if (!byGroup.ContainsKey(tag)) byGroup[tag] = new HashSet<string>();
@@ -748,6 +752,11 @@ namespace Unfriendmaxxing
         static bool inactiveOn = false;
         static int inactiveVal = 3;
         static int inactiveUnit = 1;
+        static bool togetherOn = false;
+        static int togetherVal = 60;
+        static int togetherUnit = 1; // 0=min 1=hr 2=day
+        static string searchText = "";
+        static int searchField = 0; // 0=Name, 1=Group
         static int sort = 0;
         static string status = "Starting up...";
         static bool working = false;
@@ -827,6 +836,9 @@ namespace Unfriendmaxxing
             inactiveOn = config.InactiveEnabled;
             inactiveVal = config.InactiveValue;
             inactiveUnit = config.InactiveUnitIndex;
+            togetherOn   = config.TogetherFilterEnabled;
+            togetherVal  = config.TogetherFilterValue;
+            togetherUnit = config.TogetherFilterUnit;
             sort = config.SortOptionIndex;
 
             bool firstFrame = true;
@@ -977,73 +989,84 @@ namespace Unfriendmaxxing
         {
             int sw = Raylib.GetScreenWidth();
             int sh = Raylib.GetScreenHeight();
-            float formW = Math.Min(380f, sw * 0.85f);
-            float formH = 300f;
+            float formW = Math.Min(360f, sw * 0.85f);
+            float formH = 310f;
             float ox = (sw - formW) * 0.5f;
             float oy = (sh - formH) * 0.5f;
+            float pad = 16f;
+            float fieldW = formW - pad * 2;
 
             ImGui.SetCursorPos(new Vector2(ox, oy));
             ImGui.BeginChild("##login_card", new Vector2(formW, formH), ImGuiChildFlags.Borders);
 
+            // ── Title ─────────────────────────────────────────────────────────────
             ImGui.Spacing();
-            float titleW = ImGui.CalcTextSize("VRChat Unfriend Manager").X;
-            ImGui.SetCursorPosX((formW - titleW) * 0.5f);
-            ImGui.TextColored(new Vector4(0.75f, 0.55f, 1f, 1f), "VRChat Unfriend Manager");
+            var title = "VRChat Unfriend Manager";
+            ImGui.SetCursorPosX((formW - ImGui.CalcTextSize(title).X) * 0.5f);
+            ImGui.TextColored(new Vector4(0.75f, 0.55f, 1f, 1f), title);
             ImGui.Spacing();
             ImGui.Separator();
             ImGui.Spacing();
 
+            // ── Status line ───────────────────────────────────────────────────────
             bool isSigningIn = status == "Signing in...";
             bool isErr = !isSigningIn &&
-                         (status.Contains("fail", StringComparison.OrdinalIgnoreCase) ||
-                          status.Contains("wrong", StringComparison.OrdinalIgnoreCase) ||
-                          status.Contains("error", StringComparison.OrdinalIgnoreCase) ||
+                         (status.Contains("fail",    StringComparison.OrdinalIgnoreCase) ||
+                          status.Contains("wrong",   StringComparison.OrdinalIgnoreCase) ||
+                          status.Contains("error",   StringComparison.OrdinalIgnoreCase) ||
                           status.Contains("expired", StringComparison.OrdinalIgnoreCase) ||
-                          status.Contains("cookie", StringComparison.OrdinalIgnoreCase));
+                          status.Contains("cookie",  StringComparison.OrdinalIgnoreCase));
 
-            var statusColor = isSigningIn  ? new Vector4(0.7f, 0.7f, 0.3f, 1f)
-                            : isErr        ? new Vector4(1f,   0.3f, 0.3f, 1f)
-                            :                new Vector4(0.6f, 0.6f, 0.7f, 1f);
+            var statusColor = isSigningIn ? new Vector4(0.7f, 0.7f, 0.3f, 1f)
+                            : isErr       ? new Vector4(1f,   0.3f, 0.3f, 1f)
+                            :               new Vector4(0.5f, 0.5f, 0.6f, 1f);
 
+            ImGui.SetCursorPosX(pad);
             if (isSigningIn)
             {
-                // Animated dots so the user knows something is happening
                 int dots = (int)(ImGui.GetTime() * 2) % 4;
                 ImGui.TextColored(statusColor, "Signing in" + new string('.', dots));
             }
-            else
-            {
-                ImGui.TextColored(statusColor, status);
-            }
+            else ImGui.TextColored(statusColor, status);
 
             ImGui.Spacing();
 
-            // Pre-fill username from saved config if not already set
+            // Pre-fill username if blank
             if (string.IsNullOrEmpty(user) && !string.IsNullOrEmpty(config.Username))
                 user = config.Username;
 
-            ImGui.SetNextItemWidth(formW - 24);
+            // ── Username ──────────────────────────────────────────────────────────
+            ImGui.SetCursorPosX(pad);
+            ImGui.TextDisabled("Username");
+            ImGui.SetCursorPosX(pad);
+            ImGui.SetNextItemWidth(fieldW);
             ImGui.InputText("##user", ref user, 100);
-            ImGui.SameLine(0, 0);
-            ImGui.TextDisabled(" Username");
-
-            ImGui.SetNextItemWidth(formW - 24);
-            ImGui.InputText("##pass", ref pass, 100, ImGuiInputTextFlags.Password);
-            ImGui.SameLine(0, 0);
-            ImGui.TextDisabled(" Password");
 
             ImGui.Spacing();
+
+            // ── Password ──────────────────────────────────────────────────────────
+            ImGui.SetCursorPosX(pad);
+            ImGui.TextDisabled("Password");
+            ImGui.SetCursorPosX(pad);
+            ImGui.SetNextItemWidth(fieldW);
+            ImGui.InputText("##pass", ref pass, 100, ImGuiInputTextFlags.Password);
+
+            ImGui.Spacing();
+
+            // ── Remember me ───────────────────────────────────────────────────────
+            ImGui.SetCursorPosX(pad);
             ImGui.Checkbox("Remember me", ref remember);
             ImGui.Spacing();
 
-            // Disable the button while auto-login is in progress or a manual login is running
+            // ── Login button ──────────────────────────────────────────────────────
             bool canLogin = !working && !isSigningIn &&
                             !string.IsNullOrWhiteSpace(user) &&
                             !string.IsNullOrWhiteSpace(pass);
 
+            ImGui.SetCursorPosX(pad);
             if (!canLogin) ImGui.BeginDisabled();
             if (ImGui.Button(working || isSigningIn ? "Signing in..." : "Login",
-                new Vector2(formW - 24, 32)))
+                new Vector2(fieldW, 34)))
             {
                 working = true;
                 status = "Logging in...";
@@ -1124,100 +1147,125 @@ namespace Unfriendmaxxing
         }
 
         // ─── Friends Tab ───────────────────────────────────────────────────────────
+        static readonly string[] togetherUnits = { "min", "hr", "days" };
+        static readonly string[] searchFields  = { "Name", "Group" };
+
         static void DrawFriendsTab(int sw, int sh)
         {
             ImGui.Spacing();
+
+            // ── Row 1: Hide Favorites | Inactive filter ──────────────────────────
             if (ImGui.Checkbox("Hide Favorites", ref hideFavs))
-            {
-                config.ExcludeFavorites = hideFavs;
-                SaveConfig();
-            }
+            { config.ExcludeFavorites = hideFavs; SaveConfig(); }
 
             ImGui.SameLine(0, 20);
             if (ImGui.Checkbox("Inactive >=", ref inactiveOn))
-            {
-                config.InactiveEnabled = inactiveOn;
-                SaveConfig();
-            }
-
+            { config.InactiveEnabled = inactiveOn; SaveConfig(); }
             if (inactiveOn)
             {
                 ImGui.SameLine();
-                ImGui.SetNextItemWidth(60f);
-                if (ImGui.InputInt("##iv", ref inactiveVal))
-                {
-                    if (inactiveVal < 1) inactiveVal = 1;
-                    config.InactiveValue = inactiveVal;
-                    SaveConfig();
-                }
+                ImGui.SetNextItemWidth(70f);
+                if (ImGui.InputInt("##iv", ref inactiveVal, 1, 0))
+                { if (inactiveVal < 1) inactiveVal = 1; config.InactiveValue = inactiveVal; SaveConfig(); }
                 ImGui.SameLine();
-                ImGui.SetNextItemWidth(90f);
+                ImGui.SetNextItemWidth(80f);
                 if (ImGui.Combo("##iu", ref inactiveUnit, units, units.Length))
-                {
-                    config.InactiveUnitIndex = inactiveUnit;
-                    SaveConfig();
-                }
+                { config.InactiveUnitIndex = inactiveUnit; SaveConfig(); }
                 ImGui.SameLine();
-                var cutoff = inactiveUnit switch
+                var inCutoff = inactiveUnit switch
                 {
                     0 => DateTime.UtcNow.AddDays(-inactiveVal),
                     1 => DateTime.UtcNow.AddMonths(-inactiveVal),
                     _ => DateTime.UtcNow.AddYears(-inactiveVal)
                 };
-                int matchCount = friends.Count(f =>
+                int inMatch = friends.Count(f =>
                     (!hideFavs || !favorites.Contains(f.Id)) &&
-                    (string.IsNullOrEmpty(f.LastLogin) || DateTime.Parse(f.LastLogin) < cutoff));
-                ImGui.TextColored(new Vector4(0.4f, 0.9f, 0.5f, 1f), $"({matchCount} match)");
+                    (string.IsNullOrEmpty(f.LastLogin) || DateTime.Parse(f.LastLogin) < inCutoff));
+                ImGui.TextColored(new Vector4(0.4f, 0.9f, 0.5f, 1f), $"({inMatch} match)");
             }
 
-            // VRChat native favorite group filter chips
-            if (favByGroup.Count > 0)
+            // ── Row 2: Together time filter ───────────────────────────────────────
+            if (ImGui.Checkbox("Together <", ref togetherOn))
+            { config.TogetherFilterEnabled = togetherOn; SaveConfig(); }
+            if (togetherOn)
+            {
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(70f);
+                if (ImGui.InputInt("##tv", ref togetherVal, 1, 0))
+                { if (togetherVal < 0) togetherVal = 0; config.TogetherFilterValue = togetherVal; SaveConfig(); }
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(70f);
+                if (ImGui.Combo("##tu", ref togetherUnit, togetherUnits, togetherUnits.Length))
+                { config.TogetherFilterUnit = togetherUnit; SaveConfig(); }
+                ImGui.SameLine();
+                long tThreshMs = togetherUnit switch
+                {
+                    0 => togetherVal * 60_000L,
+                    1 => togetherVal * 3_600_000L,
+                    _ => togetherVal * 86_400_000L
+                };
+                int tMatch = friends.Count(f =>
+                    (!hideFavs || !favorites.Contains(f.Id)) && f.TimeSpentMs < tThreshMs);
+                ImGui.TextColored(new Vector4(0.4f, 0.9f, 0.5f, 1f), $"({tMatch} match)");
+            }
+
+            // ── Row 3: Search bar ─────────────────────────────────────────────────
+            ImGui.Spacing();
+            ImGui.SetNextItemWidth(100f);
+            ImGui.Combo("##sf", ref searchField, searchFields, searchFields.Length);
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(sw * 0.45f);
+            ImGui.InputText("Search##sq", ref searchText, 128);
+            if (!string.IsNullOrEmpty(searchText))
+            {
+                ImGui.SameLine();
+                if (ImGui.SmallButton("x##clr")) searchText = "";
+            }
+
+            // ── Row 4: Exclude groups ─────────────────────────────────────────────
+            if (favByGroup.Any(kv => kv.Value.Count > 0 || favGroupNames.ContainsKey(kv.Key)))
             {
                 ImGui.Spacing();
                 ImGui.TextDisabled("Exclude groups:");
                 ImGui.SameLine();
                 foreach (var tag in favByGroup.Keys.OrderBy(t => t))
                 {
-                    bool excluded = config.ExcludedFavGroups.Contains(tag);
-                    string label = favGroupNames.TryGetValue(tag, out var n) ? n : tag;
-                    int count = favByGroup[tag].Count;
-                    if (ImGui.Checkbox($"##{tag}_excl", ref excluded))
+                    bool excl = config.ExcludedFavGroups.Contains(tag);
+                    string lbl = favGroupNames.TryGetValue(tag, out var gn) ? gn : tag;
+                    int cnt = favByGroup[tag].Count;
+                    if (ImGui.Checkbox($"##{tag}_excl", ref excl))
                     {
-                        if (excluded) { if (!config.ExcludedFavGroups.Contains(tag)) config.ExcludedFavGroups.Add(tag); }
+                        if (excl) { if (!config.ExcludedFavGroups.Contains(tag)) config.ExcludedFavGroups.Add(tag); }
                         else config.ExcludedFavGroups.Remove(tag);
                         SaveConfig();
                     }
                     ImGui.SameLine();
-                    ImGui.Text($"{label} ({count})");
+                    ImGui.Text($"{lbl} ({cnt})");
                     ImGui.SameLine(0, 14);
                 }
                 ImGui.NewLine();
             }
 
+            // ── Sort ──────────────────────────────────────────────────────────────
             ImGui.Spacing();
             ImGui.SetNextItemWidth(160f);
             if (ImGui.Combo("Sort", ref sort, sorts, sorts.Length))
-            {
-                config.SortOptionIndex = sort;
-                SaveConfig();
-            }
+            { config.SortOptionIndex = sort; SaveConfig(); }
 
             ImGui.Separator();
-
             ImGui.TextColored(new Vector4(0.6f, 0.6f, 0.7f, 1f), status);
             if (working && !isUnfriending)
                 ImGui.ProgressBar(-1f * (float)(ImGui.GetTime() % 1.0), new Vector2(-1, 6), "");
 
-            // Compute excluded IDs from selected native groups
+            // ── Build shown list ──────────────────────────────────────────────────
             var excludedIds = new HashSet<string>();
             foreach (var tag in config.ExcludedFavGroups)
-                if (favByGroup.TryGetValue(tag, out var ids))
-                    foreach (var id in ids) excludedIds.Add(id);
+                if (favByGroup.TryGetValue(tag, out var eids))
+                    foreach (var id in eids) excludedIds.Add(id);
 
-            // Build shown list
             shown.Clear();
             var temp = friends.ToList();
-            if (hideFavs) temp = temp.Where(f => !favorites.Contains(f.Id)).ToList();
+            if (hideFavs)              temp = temp.Where(f => !favorites.Contains(f.Id)).ToList();
             if (excludedIds.Count > 0) temp = temp.Where(f => !excludedIds.Contains(f.Id)).ToList();
             if (inactiveOn && inactiveVal > 0)
             {
@@ -1228,6 +1276,34 @@ namespace Unfriendmaxxing
                     _ => DateTime.UtcNow.AddYears(-inactiveVal)
                 };
                 temp = temp.Where(f => string.IsNullOrEmpty(f.LastLogin) || DateTime.Parse(f.LastLogin) < cutoff).ToList();
+            }
+            if (togetherOn && togetherVal >= 0)
+            {
+                long thMs = togetherUnit switch
+                {
+                    0 => togetherVal * 60_000L,
+                    1 => togetherVal * 3_600_000L,
+                    _ => togetherVal * 86_400_000L
+                };
+                temp = temp.Where(f => f.TimeSpentMs < thMs).ToList();
+            }
+            if (!string.IsNullOrWhiteSpace(searchText))
+            {
+                var q = searchText.Trim().ToLowerInvariant();
+                if (searchField == 1)
+                {
+                    temp = temp.Where(f =>
+                    {
+                        foreach (var (tag, ids) in favByGroup.OrderBy(kv => kv.Key))
+                            if (ids.Contains(f.Id))
+                            {
+                                var gn2 = favGroupNames.TryGetValue(tag, out var g) ? g : tag;
+                                return gn2.ToLowerInvariant().Contains(q);
+                            }
+                        return false;
+                    }).ToList();
+                }
+                else temp = temp.Where(f => f.DisplayName.ToLowerInvariant().Contains(q)).ToList();
             }
             temp = sort switch
             {
@@ -1240,40 +1316,34 @@ namespace Unfriendmaxxing
             };
             shown = temp;
 
-            // List height fills remaining space
+            // ── List ──────────────────────────────────────────────────────────────
             float bottomBarH = isUnfriending ? 90f : 50f;
             float listH = sh - ImGui.GetCursorPosY() - bottomBarH - ImGui.GetStyle().WindowPadding.Y * 2 - 60;
             if (listH < 80) listH = 80;
 
             if (ImGui.BeginChild("##list", new Vector2(-1, listH), ImGuiChildFlags.Borders))
             {
-                // Header row
                 ImGui.TextDisabled($"{"  ",-5}{"Name",-36} {"Last seen",8}  {"Together",9}  Group");
                 ImGui.Separator();
 
                 const float IMG_SIZE = 32f;
-                const float ROW_H = IMG_SIZE + 4f;
+                const float ROW_H    = IMG_SIZE + 4f;
 
                 for (int i = 0; i < shown.Count; i++)
                 {
-                    var f = shown[i];
-                    var ago = string.IsNullOrEmpty(f.LastLogin) ? "never" : Ago(DateTime.Parse(f.LastLogin));
+                    var f        = shown[i];
+                    var ago      = string.IsNullOrEmpty(f.LastLogin) ? "never" : Ago(DateTime.Parse(f.LastLogin));
                     var together = FormatTimeSpent(f.TimeSpentMs);
-                    bool sel = selected.Contains(i);
+                    bool sel     = selected.Contains(i);
 
                     string groupLabel = "";
-                    foreach (var (tag, ids) in favByGroup)
+                    foreach (var (tag, ids) in favByGroup.OrderBy(kv => kv.Key))
                         if (ids.Contains(f.Id))
-                        {
-                            groupLabel = favGroupNames.TryGetValue(tag, out var gn) ? gn : tag;
-                            break;
-                        }
+                        { groupLabel = favGroupNames.TryGetValue(tag, out var gn3) ? gn3 : tag; break; }
 
-                    // Reserve full-row height for the image + text to coexist
                     ImGui.PushID(i);
                     var rowStart = ImGui.GetCursorScreenPos();
 
-                    // Transparent selectable spanning the full row height
                     if (ImGui.Selectable($"##s{i}", sel,
                         ImGuiSelectableFlags.SpanAllColumns | ImGuiSelectableFlags.AllowOverlap,
                         new Vector2(0, ROW_H)))
@@ -1283,16 +1353,12 @@ namespace Unfriendmaxxing
                         else { selected.Clear(); selected.Add(i); }
                     }
 
-                    // Draw thumbnail overlaid on the selectable
                     ImGui.SetCursorScreenPos(rowStart);
                     var tex = TextureCache.RequestTexture(f.ThumbnailUrl);
                     if (tex.HasValue && tex.Value.Id != 0)
-                    {
                         ImGui.Image((nint)tex.Value.Id, new Vector2(IMG_SIZE, IMG_SIZE));
-                    }
                     else
                     {
-                        // Placeholder coloured square while loading
                         var dl = ImGui.GetWindowDrawList();
                         dl.AddRectFilled(rowStart, rowStart + new Vector2(IMG_SIZE, IMG_SIZE),
                             ImGui.GetColorU32(new Vector4(0.2f, 0.2f, 0.3f, 1f)));
@@ -1300,7 +1366,6 @@ namespace Unfriendmaxxing
                             ImGui.GetColorU32(new Vector4(0.5f, 0.5f, 0.6f, 1f)), "?");
                     }
 
-                    // Text to the right of the thumbnail, vertically centred
                     ImGui.SameLine();
                     float textY = rowStart.Y + (ROW_H - ImGui.GetTextLineHeight()) * 0.5f;
                     ImGui.SetCursorScreenPos(new Vector2(ImGui.GetCursorScreenPos().X, textY));
@@ -1786,6 +1851,9 @@ namespace Unfriendmaxxing
             config.InactiveEnabled = inactiveOn;
             config.InactiveValue = inactiveVal;
             config.InactiveUnitIndex = inactiveUnit;
+            config.TogetherFilterEnabled = togetherOn;
+            config.TogetherFilterValue = togetherVal;
+            config.TogetherFilterUnit = togetherUnit;
             config.SortOptionIndex = sort;
             try
             {

@@ -6,6 +6,7 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <UseWindowsForms>false</UseWindowsForms>
         <!-- Linux doesn't use .ico inside the binary the same way Windows does -->
         <!-- We will load icon.png manually in code -->
     </PropertyGroup>
