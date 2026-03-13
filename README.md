@@ -1,6 +1,9 @@
-﻿***
+﻿# VRChat Unfriend Manager (VRC:UFM)
 
-# VRChat Unfriend Manager (VRC:UFM)
+> Copyright © 2025 [Your Name]
+> This work is free. You can redistribute it and/or modify it under the
+> terms of the Do What The Fuck You Want To Public License, Version 2,
+> as published by Sam Hocevar. See the [LICENSE](#-license) section for more details.
 
 **VRC:UFM** is a powerful, terminal-based utility designed for managing your VRChat friends list with speed and precision. It allows you to bulk unfriend inactive users, re-add friends from backups, and organize your list without the limitations of the standard in-game or website UI.
 
@@ -71,3 +74,7 @@
     ```bash
     dotnet run
     ```
+
+---
+
+[![License: WTFPL](https://img.shields.io/badge/License-WTFPL-brightgreen.svg)](http://www.wtfpl.net/)
