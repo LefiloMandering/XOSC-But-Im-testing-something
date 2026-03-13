@@ -65,6 +65,7 @@ namespace Unfriendmaxxing
         public bool RunOnStartup { get; set; } = false;
         public bool VrcxStartupDesktop { get; set; } = false;
         public bool VrcxStartupVr { get; set; } = false;
+        public bool HideInTaskbar { get; set; } = false;
         public List<string> ExcludedFavGroups { get; set; } = new();
     }
 
@@ -774,10 +775,395 @@ namespace Unfriendmaxxing
         static bool sessionRestored = false;
         static bool shouldExit = false;
 
-        // Windows Specific Imports
-        [DllImport("kernel32.dll")] private static extern IntPtr GetConsoleWindow();
-        [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-        private const int SW_HIDE = 0;
+        // ── Windows P/Invoke ────────────────────────────────────────────────────────
+        [DllImport("kernel32.dll", SetLastError=false)] static extern IntPtr GetConsoleWindow();
+        [DllImport("user32.dll",   SetLastError=false)] static extern bool   ShowWindow(IntPtr hWnd, int cmd);
+        [DllImport("user32.dll",   SetLastError=false)] static extern IntPtr FindWindow(string? cls, string wnd);
+        [DllImport("user32.dll",   SetLastError=false)] static extern bool   SetForegroundWindow(IntPtr hWnd);
+        [DllImport("user32.dll",   SetLastError=false)] static extern bool   PeekMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax, uint wRemoveMsg);
+        [DllImport("user32.dll",   SetLastError=false)] static extern bool   TranslateMessage(ref MSG lpMsg);
+        [DllImport("user32.dll",   SetLastError=false)] static extern IntPtr DispatchMessage(ref MSG lpmsg);
+        [DllImport("user32.dll",   SetLastError=false)] static extern IntPtr DefWindowProc(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam);
+        [DllImport("user32.dll",   SetLastError=false)] static extern ushort RegisterClassEx(ref WNDCLASSEX lpwcx);
+        [DllImport("user32.dll",   SetLastError=false)] static extern IntPtr CreateWindowEx(uint dwExStyle, string lpClassName, string lpWindowName, uint dwStyle, int X, int Y, int nWidth, int nHeight, IntPtr hWndParent, IntPtr hMenu, IntPtr hInstance, IntPtr lpParam);
+        [DllImport("user32.dll",   SetLastError=false)] static extern bool   DestroyWindow(IntPtr hWnd);
+        [DllImport("user32.dll",   SetLastError=false)] static extern IntPtr LoadIcon(IntPtr hInstance, IntPtr lpIconName);
+        [DllImport("user32.dll",   SetLastError=false)] static extern IntPtr LoadImage(IntPtr hInst, string name, uint type, int cx, int cy, uint fuLoad);
+        [DllImport("user32.dll",   SetLastError=false)] static extern bool   DestroyIcon(IntPtr hIcon);
+        [DllImport("user32.dll",   SetLastError=false)] static extern bool   GetCursorPos(out POINT lpPoint);
+        [DllImport("user32.dll",   SetLastError=false)] static extern IntPtr CreatePopupMenu();
+        [DllImport("user32.dll",   SetLastError=false)] static extern bool   AppendMenu(IntPtr hMenu, uint uFlags, uint uIDNewItem, string lpNewItem);
+        [DllImport("user32.dll",   SetLastError=false)] static extern bool   TrackPopupMenu(IntPtr hMenu, uint uFlags, int x, int y, int nReserved, IntPtr hWnd, IntPtr prcRect);
+        [DllImport("user32.dll",   SetLastError=false)] static extern bool   DestroyMenu(IntPtr hMenu);
+        [DllImport("user32.dll",   SetLastError=false)] static extern void   PostQuitMessage(int nExitCode);
+        [DllImport("user32.dll",   SetLastError=false)] static extern int    GetWindowLong(IntPtr hWnd, int nIndex);
+        [DllImport("user32.dll",   SetLastError=false)] static extern int    SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+        [DllImport("shell32.dll",  SetLastError=false)] static extern bool   Shell_NotifyIcon(uint dwMessage, ref NOTIFYICONDATA lpData);
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct MSG { public IntPtr hwnd; public uint message; public IntPtr wParam; public IntPtr lParam; public uint time; public int ptX, ptY; }
+        [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; }
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        struct NOTIFYICONDATA {
+            public uint cbSize; public IntPtr hWnd; public uint uID; public uint uFlags;
+            public uint uCallbackMessage; public IntPtr hIcon;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst=128)] public string szTip;
+            public uint dwState, dwStateMask;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst=256)] public string szInfo;
+            public uint uTimeoutOrVersion;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst=64)] public string szInfoTitle;
+            public uint dwInfoFlags; public Guid guidItem; public IntPtr hBalloonIcon;
+        }
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        struct WNDCLASSEX {
+            public uint cbSize, style; public IntPtr lpfnWndProc; public int cbClsExtra, cbWndExtra;
+            public IntPtr hInstance, hIcon, hCursor, hbrBackground; public string? lpszMenuName;
+            public string lpszClassName; public IntPtr hIconSm;
+        }
+        const uint NIM_ADD=0,NIM_DELETE=2, NIF_MSG=1,NIF_ICON=2,NIF_TIP=4;
+        const uint WM_APP=0x8000, WM_TRAY_CB=WM_APP+1, WM_DESTROY=2, WM_COMMAND=0x111;
+        const uint WM_LBUTTONDBLCLK=0x203, WM_RBUTTONUP=0x205, TPM_RIGHTBUTTON=2;
+        const int  SW_HIDE=0, SW_RESTORE=9; const uint IMAGE_ICON=1, LR_LOADFROMFILE=0x10;
+
+        // ── Linux tray via GTK3 + AyatanaAppIndicator3 ──────────────────────────────
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void   D_gtk_init(ref int argc, ref IntPtr argv);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int    D_gtk_main_iteration_do(int blocking);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate IntPtr D_gtk_menu_new();
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate IntPtr D_gtk_menu_item_new_with_label([MarshalAs(UnmanagedType.LPStr)] string label);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate IntPtr D_gtk_separator_menu_item_new();
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void   D_gtk_menu_shell_append(IntPtr shell, IntPtr child);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void   D_gtk_widget_show_all(IntPtr widget);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate ulong  D_g_signal_connect_data(IntPtr inst, [MarshalAs(UnmanagedType.LPStr)] string sig, IntPtr cb, IntPtr data, IntPtr destroy, int flags);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate IntPtr D_app_indicator_new([MarshalAs(UnmanagedType.LPStr)] string id, [MarshalAs(UnmanagedType.LPStr)] string icon, int cat);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate IntPtr D_app_indicator_new_with_path([MarshalAs(UnmanagedType.LPStr)] string id, [MarshalAs(UnmanagedType.LPStr)] string icon, int cat, [MarshalAs(UnmanagedType.LPStr)] string path);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void   D_app_indicator_set_status(IntPtr self, int status);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void   D_app_indicator_set_menu(IntPtr self, IntPtr menu);
+        // GTK "activate" signal passes (widget, userdata) — must match exactly or callback silently never fires
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void   GtkActivateCb(IntPtr widget, IntPtr data);
+        static readonly List<object> _gtkGcRoots = new();
+
+        static T? LoadSym<T>(IntPtr lib, string name) where T : Delegate
+        {
+            if (lib == IntPtr.Zero) return null;
+            return NativeLibrary.TryGetExport(lib, name, out var p)
+                ? Marshal.GetDelegateForFunctionPointer<T>(p) : null;
+        }
+
+        // ── Shared tray state ───────────────────────────────────────────────────────
+        static bool   windowVisible   = true;
+        static volatile bool _showRequested = false;  // set from tray thread, consumed by main loop
+        static Thread? trayThread;
+        static IntPtr _winMsgHwnd = IntPtr.Zero, _winHicon = IntPtr.Zero;
+        delegate IntPtr WndProcDelegate(IntPtr hwnd, uint msg, IntPtr wp, IntPtr lp);
+        static WndProcDelegate? _wndProcDelegate;
+
+        // ── Show / Hide (cross-platform via Raylib flags) ───────────────────────────
+        static void ShowMainWindow()
+        {
+            // Signal the main loop to show — Raylib calls must happen on the main thread
+            _showRequested = true;
+            windowVisible  = true;
+        }
+
+        static void HideMainWindow()
+        {
+            windowVisible = false;
+            Raylib.SetWindowState(ConfigFlags.HiddenWindow);
+        }
+
+        // Hide/show the window's taskbar button.
+        // Windows: toggle WS_EX_APPWINDOW / WS_EX_TOOLWINDOW on the main HWND.
+        // Linux:   send _NET_WM_STATE_SKIP_TASKBAR via xprop (no X11 dep needed).
+        static void ApplyTaskbarVisibility(bool hideFromTaskbar)
+        {
+            try
+            {
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                {
+                    const int GWL_EXSTYLE      = -20;
+                    const int WS_EX_APPWINDOW  = 0x00040000;
+                    const int WS_EX_TOOLWINDOW = 0x00000080;
+                    var hwnd = FindWindow(null, "VRChat Unfriend Manager");
+                    if (hwnd == IntPtr.Zero) return;
+                    int ex = GetWindowLong(hwnd, GWL_EXSTYLE);
+                    if (hideFromTaskbar)
+                        ex = (ex & ~WS_EX_APPWINDOW) | WS_EX_TOOLWINDOW;
+                    else
+                        ex = (ex | WS_EX_APPWINDOW) & ~WS_EX_TOOLWINDOW;
+                    SetWindowLong(hwnd, GWL_EXSTYLE, ex);
+                    // Re-show to apply the change
+                    ShowWindow(hwnd, 0); // SW_HIDE
+                    ShowWindow(hwnd, 9); // SW_RESTORE
+                }
+                else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+                {
+                    // Use xprop to toggle _NET_WM_STATE_SKIP_TASKBAR — works on X11/KDE/GNOME
+                    string state = hideFromTaskbar ? "add" : "remove";
+                    var psi = new System.Diagnostics.ProcessStartInfo("bash",
+                        $"-c \"xprop -name 'VRChat Unfriend Manager' -f _NET_WM_STATE 32a -set _NET_WM_STATE {(hideFromTaskbar ? "_NET_WM_STATE_SKIP_TASKBAR,_NET_WM_STATE_SKIP_PAGER" : "")}\"")
+                    {
+                        UseShellExecute = false, RedirectStandardError = true
+                    };
+                    System.Diagnostics.Process.Start(psi);
+                }
+            }
+            catch (Exception ex) { Console.WriteLine($"[TASKBAR] {ex.Message}"); }
+        }
+
+        // ── Windows tray wnd-proc ────────────────────────────────────────────────────
+        static IntPtr WinTrayWndProc(IntPtr hwnd, uint msg, IntPtr wp, IntPtr lp)
+        {
+            if (msg == WM_TRAY_CB)
+            {
+                uint ev = (uint)(lp.ToInt64() & 0xFFFF);
+                if (ev == WM_LBUTTONDBLCLK) ShowMainWindow();
+                else if (ev == WM_RBUTTONUP)
+                {
+                    GetCursorPos(out var pt);
+                    var menu = CreatePopupMenu();
+                    AppendMenu(menu, 0, 1, "Show");
+                    AppendMenu(menu, 0x800, 0, "");   // MF_SEPARATOR
+                    AppendMenu(menu, 0, 2, "Exit");
+                    SetForegroundWindow(hwnd);
+                    TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.X, pt.Y, 0, hwnd, IntPtr.Zero);
+                    DestroyMenu(menu);
+                }
+            }
+            else if (msg == WM_COMMAND)
+            {
+                uint id = (uint)(wp.ToInt64() & 0xFFFF);
+                if      (id == 1) ShowMainWindow();
+                else if (id == 2) shouldExit = true;
+            }
+            else if (msg == WM_DESTROY) { PostQuitMessage(0); return IntPtr.Zero; }
+            return DefWindowProc(hwnd, msg, wp, lp);
+        }
+
+        // ── Start tray (dispatches to Win32 or Linux impl) ───────────────────────────
+        static volatile bool _trayRunning = false;
+        static readonly object _trayLock = new();
+
+        static void StartTrayThread(bool autostart)
+        {
+            lock (_trayLock)
+            {
+                if (_trayRunning) return;
+                trayThread?.Join(3000);
+                trayThread = null;
+                _trayRunning = true;
+                trayThread = new Thread(() =>
+                {
+                    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                        RunWindowsTray(autostart);
+                    else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+                        RunLinuxTray(autostart);
+                    _trayRunning = false;
+                });
+                trayThread.IsBackground = true;
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                    trayThread.SetApartmentState(ApartmentState.STA);
+                trayThread.Start();
+            }
+        }
+
+        static void StopTrayThread()
+        {
+            lock (_trayLock)
+            {
+                _trayRunning = false;
+                trayThread?.Join(3000);
+                trayThread = null;
+            }
+        }
+
+        static void RunWindowsTray(bool autostart)
+        {
+            _wndProcDelegate = WinTrayWndProc;
+            var wc = new WNDCLASSEX {
+                cbSize = (uint)Marshal.SizeOf<WNDCLASSEX>(),
+                lpfnWndProc = Marshal.GetFunctionPointerForDelegate(_wndProcDelegate),
+                lpszClassName = "VUMTray", hInstance = IntPtr.Zero,
+            };
+            RegisterClassEx(ref wc);
+            _winMsgHwnd = CreateWindowEx(0, "VUMTray", "", 0, 0, 0, 0, 0,
+                new IntPtr(-3), IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+
+            _winHicon = IntPtr.Zero;
+            if (File.Exists("icon.ico"))
+                _winHicon = LoadImage(IntPtr.Zero, "icon.ico", IMAGE_ICON, 16, 16, LR_LOADFROMFILE);
+            if (_winHicon == IntPtr.Zero)
+                _winHicon = LoadIcon(IntPtr.Zero, new IntPtr(32512));
+
+            var nid = new NOTIFYICONDATA {
+                cbSize = (uint)Marshal.SizeOf<NOTIFYICONDATA>(),
+                hWnd = _winMsgHwnd, uID = 1,
+                uFlags = NIF_MSG | NIF_ICON | NIF_TIP,
+                uCallbackMessage = WM_TRAY_CB,
+                hIcon = _winHicon, szTip = "VRChat Unfriend Manager",
+            };
+            Shell_NotifyIcon(NIM_ADD, ref nid);
+
+            if (autostart) HideMainWindow();
+
+            while (!shouldExit && _trayRunning)
+            {
+                if (PeekMessage(out var m, IntPtr.Zero, 0, 0, 1))
+                { TranslateMessage(ref m); DispatchMessage(ref m); }
+                else Thread.Sleep(10);
+            }
+
+            Shell_NotifyIcon(NIM_DELETE, ref nid);
+            if (_winHicon != IntPtr.Zero) DestroyIcon(_winHicon);
+            if (_winMsgHwnd != IntPtr.Zero) DestroyWindow(_winMsgHwnd);
+        }
+
+        // Persistent Linux tray state — created once, never recreated
+        static IntPtr _gtkIndicator   = IntPtr.Zero;
+        static D_app_indicator_set_status? _ind_set_status;
+        static D_gtk_main_iteration_do?    _gtk_main_iteration_do;
+        static bool _gtkInitialized = false;
+
+        static void SetLinuxTrayVisible(bool visible)
+        {
+            if (_ind_set_status != null && _gtkIndicator != IntPtr.Zero)
+                _ind_set_status(_gtkIndicator, visible ? 1 : 0); // ACTIVE=1, PASSIVE=0
+        }
+
+        static void RunLinuxTray(bool autostart)
+        {
+            // If already initialized, just pump the GTK loop — indicator already exists
+            if (_gtkInitialized)
+            {
+                SetLinuxTrayVisible(true);
+                if (autostart) HideMainWindow();
+                while (!shouldExit && _trayRunning)
+                {
+                    _gtk_main_iteration_do!(0);
+                    Thread.Sleep(16);
+                }
+                SetLinuxTrayVisible(false);
+                return;
+            }
+
+            IntPtr gtk = IntPtr.Zero;
+            foreach (var n in new[]{"libgtk-3.so.0","libgtk-3.so"})
+                if (NativeLibrary.TryLoad(n, out gtk) && gtk != IntPtr.Zero) break;
+
+            if (gtk == IntPtr.Zero)
+            {
+                Console.WriteLine("[TRAY] libgtk-3 not found");
+                if (autostart) HideMainWindow();
+                return;
+            }
+
+            IntPtr indLib = IntPtr.Zero;
+            foreach (var n in new[]{"libayatana-appindicator3.so.1","libayatana-appindicator3.so",
+                                    "libappindicator3.so.1","libappindicator3.so"})
+                if (NativeLibrary.TryLoad(n, out indLib) && indLib != IntPtr.Zero) break;
+
+            try
+            {
+                var gtk_init                     = LoadSym<D_gtk_init>(gtk, "gtk_init")!;
+                _gtk_main_iteration_do           = LoadSym<D_gtk_main_iteration_do>(gtk, "gtk_main_iteration_do")!;
+                var gtk_menu_new                 = LoadSym<D_gtk_menu_new>(gtk, "gtk_menu_new")!;
+                var gtk_menu_item_new_with_label = LoadSym<D_gtk_menu_item_new_with_label>(gtk, "gtk_menu_item_new_with_label")!;
+                var gtk_separator_menu_item_new  = LoadSym<D_gtk_separator_menu_item_new>(gtk, "gtk_separator_menu_item_new")!;
+                var gtk_menu_shell_append        = LoadSym<D_gtk_menu_shell_append>(gtk, "gtk_menu_shell_append")!;
+                var gtk_widget_show_all          = LoadSym<D_gtk_widget_show_all>(gtk, "gtk_widget_show_all")!;
+
+                var g_signal_connect_data = LoadSym<D_g_signal_connect_data>(gtk, "g_signal_connect_data");
+                if (g_signal_connect_data == null)
+                {
+                    IntPtr glib = IntPtr.Zero;
+                    foreach (var n in new[]{"libglib-2.0.so.0","libglib-2.0.so"})
+                        if (NativeLibrary.TryLoad(n, out glib) && glib != IntPtr.Zero) break;
+                    g_signal_connect_data = LoadSym<D_g_signal_connect_data>(glib, "g_signal_connect_data");
+                }
+                if (g_signal_connect_data == null)
+                    Console.WriteLine("[TRAY] g_signal_connect_data not found — menu items won't work");
+
+                int argc = 0; IntPtr argv = IntPtr.Zero;
+                gtk_init(ref argc, ref argv);
+
+                // Build menu
+                var menu     = gtk_menu_new();
+                var itemShow = gtk_menu_item_new_with_label("Show");
+                gtk_menu_shell_append(menu, itemShow);
+                if (g_signal_connect_data != null)
+                {
+                    var cb = new GtkActivateCb((w, d) => { _showRequested = true; windowVisible = true; });
+                    _gtkGcRoots.Add(cb);
+                    g_signal_connect_data(itemShow, "activate", Marshal.GetFunctionPointerForDelegate(cb), IntPtr.Zero, IntPtr.Zero, 0);
+                }
+
+                gtk_menu_shell_append(menu, gtk_separator_menu_item_new());
+
+                var itemExit = gtk_menu_item_new_with_label("Exit");
+                gtk_menu_shell_append(menu, itemExit);
+                if (g_signal_connect_data != null)
+                {
+                    var cb = new GtkActivateCb((w, d) => { shouldExit = true; });
+                    _gtkGcRoots.Add(cb);
+                    g_signal_connect_data(itemExit, "activate", Marshal.GetFunctionPointerForDelegate(cb), IntPtr.Zero, IntPtr.Zero, 0);
+                }
+
+                gtk_widget_show_all(menu);
+
+                // Create AppIndicator — once per process lifetime
+                if (indLib != IntPtr.Zero)
+                {
+                    var ind_new        = LoadSym<D_app_indicator_new>(indLib, "app_indicator_new");
+                    var ind_new_path   = LoadSym<D_app_indicator_new_with_path>(indLib, "app_indicator_new_with_path");
+                    _ind_set_status    = LoadSym<D_app_indicator_set_status>(indLib, "app_indicator_set_status");
+                    var ind_set_menu   = LoadSym<D_app_indicator_set_menu>(indLib, "app_indicator_set_menu");
+
+                    string? srcIcon = null;
+                    foreach (var p in new[]{"icon.png","icon.ico"})
+                        if (File.Exists(p)) { srcIcon = Path.GetFullPath(p); break; }
+
+                    if (srcIcon != null && ind_new_path != null)
+                    {
+                        string tmpDir  = Path.Combine(Path.GetTempPath(), "vum-icons");
+                        string appsDir = Path.Combine(tmpDir, "hicolor", "64x64", "apps");
+                        Directory.CreateDirectory(appsDir);
+                        File.Copy(srcIcon, Path.Combine(appsDir, "vrchat-unfriend-manager.png"), overwrite: true);
+                        _gtkIndicator = ind_new_path("vrchat-unfriend-manager", "vrchat-unfriend-manager", 1, tmpDir);
+                    }
+                    else if (ind_new != null)
+                    {
+                        _gtkIndicator = ind_new("vrchat-unfriend-manager", "application-x-executable", 1);
+                    }
+
+                    if (_gtkIndicator != IntPtr.Zero && _ind_set_status != null && ind_set_menu != null)
+                    {
+                        _ind_set_status(_gtkIndicator, 1); // ACTIVE
+                        ind_set_menu(_gtkIndicator, menu);
+                        Console.WriteLine("[TRAY] AppIndicator ready");
+                    }
+                }
+                else
+                {
+                    Console.WriteLine("[TRAY] No appindicator lib — install libayatana-appindicator3");
+                }
+
+                _gtkInitialized = true;
+                if (autostart) HideMainWindow();
+
+                while (!shouldExit && _trayRunning)
+                {
+                    _gtk_main_iteration_do(0);
+                    Thread.Sleep(16);
+                }
+
+                // Hide indicator when tray is disabled (don't destroy — can't re-register D-Bus path)
+                SetLinuxTrayVisible(false);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[TRAY-LINUX] {ex.Message}\n{ex.StackTrace}");
+                if (autostart) HideMainWindow();
+            }
+        }
 
         public static async Task Main(string[] args)
         {
@@ -797,8 +1183,6 @@ namespace Unfriendmaxxing
 
             // Standard window (no custom title bar)
             ConfigFlags flags = ConfigFlags.ResizableWindow | ConfigFlags.HighDpiWindow;
-            if (isAutostart) flags |= ConfigFlags.HiddenWindow;
-
             Raylib.SetConfigFlags(flags);
             Raylib.InitWindow(1280, 800, "VRChat Unfriend Manager");
 
@@ -827,6 +1211,13 @@ namespace Unfriendmaxxing
 #endif
             }
 
+            // Tray icon — only active when "Hide in taskbar" is enabled
+            if (config.HideInTaskbar)
+            {
+                StartTrayThread(isAutostart);
+                ApplyTaskbarVisibility(true);
+            }
+
             rlImGui.Setup(true);
             ApplyTheme();
 
@@ -841,37 +1232,64 @@ namespace Unfriendmaxxing
             togetherUnit = config.TogetherFilterUnit;
             sort = config.SortOptionIndex;
 
-            bool firstFrame = true;
+            // Kick off session restore immediately — even if window starts hidden
+            {
+                bool hasCredentials = !string.IsNullOrEmpty(config.Username) &&
+                                     !string.IsNullOrEmpty(config.EncodedPassword);
+                bool hasCookie = (!string.IsNullOrEmpty(config.Cookie) && config.Cookie.Contains("auth="))
+                                 || File.Exists(Paths.CookieFile);
+                if (hasCredentials || hasCookie)
+                    status = "Signing in...";
+
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(300);
+                    var (restored, name) = await api.RestoreSessionFromDiskOrConfigAsync();
+                    if (restored && name != null)
+                    {
+                        loggedInAs = name;
+                        isLoggedIn = true;
+                        sessionRestored = true;
+                        status = $"Welcome back, {name}";
+                        await Refresh();
+                        if (config.AutoUnfriendEnabled) StartAutoScheduler();
+                    }
+                    else
+                    {
+                        status = string.IsNullOrEmpty(config.Username)
+                            ? "Please log in"
+                            : "Session expired — please log in again";
+                    }
+                });
+            }
 
             while (!shouldExit)
             {
-                // Background / autostart mode
-                if (isAutostart)
+                // Apply show-window requests from the tray thread (must run on main thread)
+                if (_showRequested)
                 {
-                    if (firstFrame)
-                    {
-                        firstFrame = false;
-                        _ = Task.Run(async () =>
-                        {
-                            await Task.Delay(1000);
-                            var (restored, name) = await api.RestoreSessionFromDiskOrConfigAsync();
-                            if (restored && name != null)
-                            {
-                                loggedInAs = name;
-                                isLoggedIn = true;
-                                sessionRestored = true;
-                                status = $"Background Login: {name}";
-                                if (config.AutoUnfriendEnabled) StartAutoScheduler();
-                            }
-                        });
-                    }
+                    _showRequested = false;
+                    Raylib.ClearWindowState(ConfigFlags.HiddenWindow);
+                    Raylib.SetWindowState(ConfigFlags.TopmostWindow);   // bring to front
+                    Raylib.ClearWindowState(ConfigFlags.TopmostWindow); // then release topmost
+                }
 
+                // While window is hidden: just keep the scheduler alive, don't render
+                if (!windowVisible)
+                {
                     Raylib.PollInputEvents();
-                    Thread.Sleep(100);
+                    Thread.Sleep(50);
                     continue;
                 }
 
-                if (Raylib.WindowShouldClose()) { shouldExit = true; continue; }
+                if (Raylib.WindowShouldClose())
+                {
+                    if (config.HideInTaskbar)
+                        HideMainWindow();
+                    else
+                        shouldExit = true;
+                    continue;
+                }
 
                 // Resize-aware: get current window size each frame
                 int screenW = Raylib.GetScreenWidth();
@@ -890,40 +1308,6 @@ namespace Unfriendmaxxing
                 ImGui.Begin("##main", ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoTitleBar |
                     ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoScrollbar |
                     ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.NoBringToFrontOnFocus);
-
-                if (firstFrame)
-                {
-                    firstFrame = false;
-                    // Show "Signing in..." immediately if we have credentials to try
-                    bool hasCredentials = !string.IsNullOrEmpty(config.Username) &&
-                                         !string.IsNullOrEmpty(config.EncodedPassword);
-                    bool hasCookie = (!string.IsNullOrEmpty(config.Cookie) && config.Cookie.Contains("auth="))
-                                     || File.Exists(Paths.CookieFile);
-                    if (hasCredentials || hasCookie)
-                        status = "Signing in...";
-
-                    _ = Task.Run(async () =>
-                    {
-                        await Task.Delay(200); // let the window paint once before blocking on network
-                        var (restored, name) = await api.RestoreSessionFromDiskOrConfigAsync();
-                        if (restored && name != null)
-                        {
-                            loggedInAs = name;
-                            isLoggedIn = true;
-                            sessionRestored = true;
-                            status = $"Welcome back, {name}";
-                            await Refresh();
-                            if (config.AutoUnfriendEnabled) StartAutoScheduler();
-                        }
-                        else
-                        {
-                            // Clear any stale status — show clean login screen
-                            status = string.IsNullOrEmpty(config.Username)
-                                ? "Please log in"
-                                : "Session expired — please log in again";
-                        }
-                    });
-                }
 
                 if (sessionRestored || isLoggedIn) DrawMainUI();
                 else DrawLoginScreen();
@@ -1518,6 +1902,26 @@ namespace Unfriendmaxxing
                 config.RunOnStartup = runOnStartup;
                 SaveConfig();
                 UpdateStartup(runOnStartup);
+            }
+
+            bool hideInTaskbar = config.HideInTaskbar;
+            if (ImGui.Checkbox("Hide in taskbar", ref hideInTaskbar))
+            {
+                config.HideInTaskbar = hideInTaskbar;
+                SaveConfig();
+                if (hideInTaskbar)
+                {
+                    ApplyTaskbarVisibility(true);
+                    Task.Run(() => StartTrayThread(false));
+                }
+                else
+                {
+                    Task.Run(() => {
+                        StopTrayThread();
+                        ApplyTaskbarVisibility(false);
+                        if (!windowVisible) ShowMainWindow();
+                    });
+                }
             }
 
             if (Directory.Exists(Paths.VrcxStartup))
