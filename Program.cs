@@ -1173,6 +1173,9 @@ namespace Unfriendmaxxing
             Paths.EnsureExists();
             LoadConfig();
 
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+                InstallLinuxDesktopEntry();
+
             if (Directory.Exists(Paths.VrcxStartup))
             {
                 UpdateVrcxShortcut("desktop", config.VrcxStartupDesktop);
@@ -2169,6 +2172,110 @@ namespace Unfriendmaxxing
             {
                 try { Process.Start("notify-send", $"\"{title}\" \"{msg}\""); } catch { }
             }
+        }
+
+        static void InstallLinuxDesktopEntry()
+        {
+            try
+            {
+                string exePath = Process.GetCurrentProcess().MainModule?.FileName ?? "";
+                if (string.IsNullOrEmpty(exePath)) return;
+
+                string exeDir = Path.GetDirectoryName(exePath) ?? "";
+
+                // Find icon — check exe dir, CWD, and up to 3 parent dirs (covers debug builds)
+                string? iconSrc = null;
+                var searchDirs = new List<string> { exeDir, Directory.GetCurrentDirectory() };
+                var dir = exeDir;
+                for (int i = 0; i < 3; i++)
+                {
+                    dir = Path.GetDirectoryName(dir) ?? "";
+                    if (!string.IsNullOrEmpty(dir)) searchDirs.Add(dir);
+                }
+                foreach (var d in searchDirs)
+                    foreach (var name in new[]{ "icon.png", "icon.ico" })
+                    {
+                        var p = Path.Combine(d, name);
+                        if (File.Exists(p)) { iconSrc = Path.GetFullPath(p); break; }
+                    }
+
+                string iconName = "vrchat-unfriend-manager";
+                string iconDir  = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                    ".local", "share", "icons", "hicolor", "256x256", "apps");
+                Directory.CreateDirectory(iconDir);
+                string iconDest = Path.Combine(iconDir, $"{iconName}.png");
+
+                if (iconSrc != null && (!File.Exists(iconDest) ||
+                    File.GetLastWriteTimeUtc(iconSrc) > File.GetLastWriteTimeUtc(iconDest)))
+                {
+                    if (iconSrc.EndsWith(".ico", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Convert .ico → .png via ImageMagick (extract largest layer: [0])
+                        bool converted = false;
+                        try
+                        {
+                            var psi = new System.Diagnostics.ProcessStartInfo("convert",
+                                $"\"{iconSrc}[0]\" \"{iconDest}\"")
+                            { UseShellExecute = false, RedirectStandardError = true };
+                            var proc = System.Diagnostics.Process.Start(psi);
+                            proc?.WaitForExit(5000);
+                            converted = proc?.ExitCode == 0 && File.Exists(iconDest);
+                        }
+                        catch { }
+
+                        if (!converted)
+                        {
+                            // ImageMagick not available — try magick (newer name)
+                            try
+                            {
+                                var psi = new System.Diagnostics.ProcessStartInfo("magick",
+                                    $"\"{iconSrc}[0]\" \"{iconDest}\"")
+                                { UseShellExecute = false, RedirectStandardError = true };
+                                var proc = System.Diagnostics.Process.Start(psi);
+                                proc?.WaitForExit(5000);
+                                converted = proc?.ExitCode == 0 && File.Exists(iconDest);
+                            }
+                            catch { }
+                        }
+
+                        if (!converted)
+                            Console.WriteLine("[DESKTOP] Could not convert icon.ico to PNG — install imagemagick");
+                    }
+                    else
+                    {
+                        File.Copy(iconSrc, iconDest, overwrite: true);
+                    }
+                }
+
+                // Write .desktop file
+                string desktopDir  = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                    ".local", "share", "applications");
+                Directory.CreateDirectory(desktopDir);
+                string desktopPath = Path.Combine(desktopDir, $"{iconName}.desktop");
+
+                string iconLine = File.Exists(iconDest) ? iconName : "application-x-executable";
+                string desktop = $"""
+[Desktop Entry]
+Type=Application
+Name=VRChat Unfriend Manager
+Comment=Manage and unfriend VRChat friends
+Exec={exePath}
+Icon={iconLine}
+Categories=Utility;
+Terminal=false
+StartupNotify=true
+""";
+                if (!File.Exists(desktopPath) || File.ReadAllText(desktopPath) != desktop)
+                {
+                    File.WriteAllText(desktopPath, desktop);
+                    try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+                        "update-desktop-database", desktopDir) { UseShellExecute = false }); } catch { }
+                    Console.WriteLine($"[DESKTOP] Installed {desktopPath}");
+                }
+            }
+            catch (Exception ex) { Console.WriteLine($"[DESKTOP] {ex.Message}"); }
         }
 
         static void UpdateStartup(bool enable)

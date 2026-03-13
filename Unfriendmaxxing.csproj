@@ -7,8 +7,21 @@
         <Nullable>enable</Nullable>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
         <UseWindowsForms>false</UseWindowsForms>
-        <!-- Linux doesn't use .ico inside the binary the same way Windows does -->
-        <!-- We will load icon.png manually in code -->
+
+        <!-- Windows: embed icon into the .exe so it shows in Explorer -->
+        <ApplicationIcon Condition="$([MSBuild]::IsOsPlatform('Windows'))">icon.ico</ApplicationIcon>
+
+        <!-- Version info -->
+        <Version>1.0.0</Version>
+        <AssemblyVersion>1.0.0.0</AssemblyVersion>
+        <FileVersion>1.0.0.0</FileVersion>
+        <Product>VRChat Unfriend Manager</Product>
+        <Description>Manage and unfriend VRChat friends</Description>
+    </PropertyGroup>
+
+    <!-- Windows: DPI-aware manifest so the exe icon renders properly -->
+    <PropertyGroup Condition="$([MSBuild]::IsOsPlatform('Windows'))">
+        <ApplicationManifest>app.manifest</ApplicationManifest>
     </PropertyGroup>
 
     <ItemGroup>
@@ -22,10 +35,15 @@
     </ItemGroup>
 
     <ItemGroup>
-        <!-- Ensure you have an icon.png in your project folder -->
-        <None Update="icon.png">
+        <!-- Embed icons into the assembly (existing behaviour) -->
+        <None Remove="icon.png" />
+        <EmbeddedResource Include="icon.png">
             <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-        </None>
+        </EmbeddedResource>
+        <None Remove="icon.ico" />
+        <EmbeddedResource Include="icon.ico">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </EmbeddedResource>
     </ItemGroup>
 
 </Project>
