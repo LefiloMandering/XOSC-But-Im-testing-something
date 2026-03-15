@@ -107,6 +107,8 @@ namespace Unfriendmaxxing
             TextureCache.SetCookie(fullCookie);
         }
 
+        private string? _lastParsedDisplayName;
+
         private async Task<bool> TestSessionAsync()
         {
             if (cfg == null) return false;
@@ -117,12 +119,12 @@ namespace Unfriendmaxxing
                 if (cfg.DefaultHeaders.TryGetValue("Cookie", out var c))
                     test.DefaultRequestHeaders.Add("Cookie", c);
                 var r = await test.GetAsync("https://api.vrchat.cloud/api/1/auth/user");
-                if (!r.IsSuccessStatusCode) return false;
                 var body = await r.Content.ReadAsStringAsync();
+                if (!r.IsSuccessStatusCode) return false;
                 if (!body.Contains("\"id\"", StringComparison.OrdinalIgnoreCase)) return false;
-                // Opportunistically grab the user ID so GetFavoriteGroupNamesAsync works immediately
-                var (_, userId) = ParseUserFromJson(body);
+                var (displayName, userId) = ParseUserFromJson(body);
                 if (!string.IsNullOrWhiteSpace(userId)) CurrentUserId = userId;
+                _lastParsedDisplayName = displayName; // cache for caller to use
                 return true;
             }
             catch { return false; }
@@ -130,6 +132,13 @@ namespace Unfriendmaxxing
 
         private async Task<string?> GetCurrentDisplayNameAsync()
         {
+            // Use the name already parsed during TestSessionAsync if available
+            if (!string.IsNullOrWhiteSpace(_lastParsedDisplayName))
+            {
+                var n = _lastParsedDisplayName;
+                _lastParsedDisplayName = null;
+                return n;
+            }
             if (cfg == null) return null;
             try
             {
@@ -144,7 +153,28 @@ namespace Unfriendmaxxing
 
         public async Task<(bool success, string? displayName)> RestoreSessionFromDiskOrConfigAsync()
         {
-            // 1. Try saved cookie from config
+            show2FADialog = false; // reset any leftover dialog state
+
+            // 0. Try importing auth cookie directly from VRCX's SQLite database
+            //    VRCX stores cookies in its config table under keys "auth" and "twoFactorAuth"
+            var vrcxCookie = TryGetVrcxCookie();
+            if (vrcxCookie != null)
+            {
+                cfg = new Configuration { UserAgent = UA };
+                cfg.DefaultHeaders["Cookie"] = vrcxCookie;
+                if (await TestSessionAsync())
+                {
+                    Program.config.Cookie = vrcxCookie;
+                    Program.SaveConfig();
+                    TextureCache.SetCookie(vrcxCookie);
+                    var name = await GetCurrentDisplayNameAsync();
+                    if (!string.IsNullOrWhiteSpace(name))
+                    {
+                        Console.WriteLine("[AUTH] Logged in via VRCX cookie");
+                        return (true, name);
+                    }
+                }
+            }
             if (!string.IsNullOrWhiteSpace(Program.config.Cookie) && Program.config.Cookie.Contains("auth="))
             {
                 cfg = new Configuration { UserAgent = UA };
@@ -500,6 +530,67 @@ namespace Unfriendmaxxing
 
             Console.WriteLine($"[FAV_GROUPS] Final: {string.Join(", ", result.Select(kv => $"{kv.Key}={kv.Value}"))}");
             return result;
+        }
+
+        /// <summary>
+        /// Reads the VRChat auth cookie directly from VRCX's SQLite database.
+        /// VRCX stores cookies in its config table under keys "auth" and "twoFactorAuth".
+        /// Returns "auth=xxx; twoFactorAuth=yyy" or null if unavailable/encrypted.
+        /// </summary>
+        public string? TryGetVrcxCookie()
+        {
+            try
+            {
+                string dbPath = Path.Combine(Paths.VrcxBase, "VRCX.sqlite3");
+                if (!File.Exists(dbPath)) return null;
+
+                using var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                    $"Data Source={dbPath};Mode=ReadOnly;Cache=Shared");
+                conn.Open();
+
+                // VRCX stores cookies in the `cookies` table, key="default",
+                // value = base64-encoded JSON array of .NET Cookie objects
+                string? b64 = null;
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = "SELECT value FROM cookies WHERE key='default' LIMIT 1";
+                    var result = cmd.ExecuteScalar();
+                    b64 = result as string;
+                }
+
+                if (string.IsNullOrWhiteSpace(b64)) return null;
+
+                // Decode base64 → JSON array
+                var json = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(b64));
+                using var doc = JsonDocument.Parse(json);
+
+                string? auth = null, tfa = null;
+                foreach (var cookie in doc.RootElement.EnumerateArray())
+                {
+                    string? name  = cookie.TryGetProperty("Name",  out var n) ? n.GetString() : null;
+                    string? value = cookie.TryGetProperty("Value", out var v) ? v.GetString() : null;
+                    if (name == "auth") auth = value;
+                    else if (name == "twoFactorAuth") tfa = value;
+                }
+
+                if (string.IsNullOrWhiteSpace(auth) || !auth.StartsWith("authcookie_"))
+                {
+                    Console.WriteLine("[VRCX-AUTH] No valid auth cookie in VRCX cookies table");
+                    return null;
+                }
+
+                var cookie2 = $"auth={auth}";
+                if (!string.IsNullOrWhiteSpace(tfa))
+                    cookie2 += $"; twoFactorAuth={tfa}";
+
+                Console.WriteLine("[VRCX-AUTH] Auth cookie found in VRCX database");
+                return cookie2;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[VRCX-AUTH] {ex.Message}");
+                return null;
+            }
         }
     }
 
@@ -1241,7 +1332,8 @@ namespace Unfriendmaxxing
                                      !string.IsNullOrEmpty(config.EncodedPassword);
                 bool hasCookie = (!string.IsNullOrEmpty(config.Cookie) && config.Cookie.Contains("auth="))
                                  || File.Exists(Paths.CookieFile);
-                if (hasCredentials || hasCookie)
+                bool hasVrcx = File.Exists(Path.Combine(Paths.VrcxBase, "VRCX.sqlite3"));
+                if (hasCredentials || hasCookie || hasVrcx)
                     status = "Signing in...";
 
                 _ = Task.Run(async () =>
@@ -2256,17 +2348,16 @@ namespace Unfriendmaxxing
                 string desktopPath = Path.Combine(desktopDir, $"{iconName}.desktop");
 
                 string iconLine = File.Exists(iconDest) ? iconName : "application-x-executable";
-                string desktop = $"""
-[Desktop Entry]
-Type=Application
-Name=VRChat Unfriend Manager
-Comment=Manage and unfriend VRChat friends
-Exec={exePath}
-Icon={iconLine}
-Categories=Utility;
-Terminal=false
-StartupNotify=true
-""";
+                string desktop =
+                    "[Desktop Entry]\n" +
+                    "Type=Application\n" +
+                    "Name=VRChat Unfriend Manager\n" +
+                    "Comment=Manage and unfriend VRChat friends\n" +
+                    $"Exec={exePath}\n" +
+                    $"Icon={iconLine}\n" +
+                    "Categories=Utility;\n" +
+                    "Terminal=false\n" +
+                    "StartupNotify=true\n";
                 if (!File.Exists(desktopPath) || File.ReadAllText(desktopPath) != desktop)
                 {
                     File.WriteAllText(desktopPath, desktop);
