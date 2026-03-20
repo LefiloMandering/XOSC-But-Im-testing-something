@@ -62,6 +62,14 @@ namespace Unfriendmaxxing
         public int AutoUnfriendHour { get; set; } = 3;
         public int AutoUnfriendMinute { get; set; } = 0;
         public int AutoUnfriendMode { get; set; } = 0;
+        // Schedule type: 0=Daily, 1=Monthly, 2=Once (specific date)
+        public int AutoUnfriendScheduleType { get; set; } = 0;
+        // For Monthly: which day of month (1-31)
+        public int AutoUnfriendMonthDay { get; set; } = 1;
+        // For Once: specific date
+        public int AutoUnfriendYear { get; set; } = DateTime.Now.Year;
+        public int AutoUnfriendMonth { get; set; } = DateTime.Now.Month;
+        public int AutoUnfriendDay { get; set; } = DateTime.Now.Day;
         public bool RunOnStartup { get; set; } = false;
         public bool VrcxStartupDesktop { get; set; } = false;
         public bool VrcxStartupVr { get; set; } = false;
@@ -2062,39 +2070,147 @@ namespace Unfriendmaxxing
             if (config.AutoUnfriendEnabled)
             {
                 ImGui.Spacing();
-                ImGui.Text("Schedule time:");
-                ImGui.SameLine();
 
-                int h = config.AutoUnfriendHour;
+                // ── Schedule Type ──────────────────────────────────────────────
+                ImGui.Text("Repeat:");
+                ImGui.SameLine();
+                int schedType = config.AutoUnfriendScheduleType;
+                string[] schedTypes = { "Daily", "Monthly", "Once (specific date)" };
+                ImGui.SetNextItemWidth(200);
+                if (ImGui.Combo("##schedtype", ref schedType, schedTypes, schedTypes.Length))
+                {
+                    config.AutoUnfriendScheduleType = schedType;
+                    SaveConfig(); StartAutoScheduler();
+                }
+
+                ImGui.Spacing();
+
+                // ── Date fields (Monthly shows day-of-month, Once shows full date) ──
+                if (config.AutoUnfriendScheduleType == 1) // Monthly
+                {
+                    ImGui.Text("Day of month:");
+                    ImGui.SameLine();
+                    int md = config.AutoUnfriendMonthDay;
+                    ImGui.SetNextItemWidth(60);
+                    if (ImGui.DragInt("##mday", ref md, 0.1f, 1, 28, "%d"))
+                    {
+                        config.AutoUnfriendMonthDay = Math.Clamp(md, 1, 28);
+                        SaveConfig(); StartAutoScheduler();
+                    }
+                }
+                else if (config.AutoUnfriendScheduleType == 2) // Once
+                {
+                    ImGui.Text("Date:");
+                    ImGui.SameLine();
+                    int dy = config.AutoUnfriendYear;
+                    int dm = config.AutoUnfriendMonth;
+                    int dd = config.AutoUnfriendDay;
+                    ImGui.SetNextItemWidth(40);
+                    if (ImGui.DragInt("##dd", ref dd, 0.1f, 1, 31, "%02d"))
+                    { config.AutoUnfriendDay = Math.Clamp(dd, 1, 31); SaveConfig(); StartAutoScheduler(); }
+                    ImGui.SameLine(); ImGui.Text("/");
+                    ImGui.SameLine();
+                    ImGui.SetNextItemWidth(40);
+                    if (ImGui.DragInt("##dm", ref dm, 0.1f, 1, 12, "%02d"))
+                    { config.AutoUnfriendMonth = Math.Clamp(dm, 1, 12); SaveConfig(); StartAutoScheduler(); }
+                    ImGui.SameLine(); ImGui.Text("/");
+                    ImGui.SameLine();
+                    ImGui.SetNextItemWidth(70);
+                    if (ImGui.DragInt("##dy", ref dy, 0.2f, DateTime.Now.Year, DateTime.Now.Year + 10, "%d"))
+                    { config.AutoUnfriendYear = dy; SaveConfig(); StartAutoScheduler(); }
+                }
+
+                // ── Time ──────────────────────────────────────────────────────
+                ImGui.Spacing();
+                ImGui.Text("Time:");
+                ImGui.SameLine();
+                // Convert stored 24h to 12h for display
+                int h24 = config.AutoUnfriendHour;
+                bool isPm = h24 >= 12;
+                int h12 = h24 % 12; if (h12 == 0) h12 = 12;
                 int m = config.AutoUnfriendMinute;
-                ImGui.SetNextItemWidth(55);
-                if (ImGui.InputInt("##ah", ref h)) { h = Math.Clamp(h, 0, 23); config.AutoUnfriendHour = h; SaveConfig(); StartAutoScheduler(); }
+
+                ImGui.SetNextItemWidth(60);
+                if (ImGui.DragInt("##ah", ref h12, 0.1f, 1, 12, "%02d"))
+                {
+                    h12 = Math.Clamp(h12, 1, 12);
+                    config.AutoUnfriendHour = (h12 % 12) + (isPm ? 12 : 0);
+                    SaveConfig(); StartAutoScheduler();
+                }
                 ImGui.SameLine(); ImGui.Text(":");
                 ImGui.SameLine();
-                ImGui.SetNextItemWidth(55);
-                if (ImGui.InputInt("##am", ref m)) { m = Math.Clamp(m, 0, 59); config.AutoUnfriendMinute = m; SaveConfig(); StartAutoScheduler(); }
+                ImGui.SetNextItemWidth(60);
+                if (ImGui.DragInt("##am", ref m, 0.1f, 0, 59, "%02d"))
+                {
+                    config.AutoUnfriendMinute = Math.Clamp(m, 0, 59);
+                    SaveConfig(); StartAutoScheduler();
+                }
+                ImGui.SameLine();
+                // AM/PM toggle button
+                if (ImGui.Button(isPm ? "PM" : "AM"))
+                {
+                    isPm = !isPm;
+                    config.AutoUnfriendHour = (h12 % 12) + (isPm ? 12 : 0);
+                    SaveConfig(); StartAutoScheduler();
+                }
 
+                // ── Mode ──────────────────────────────────────────────────────
                 ImGui.Spacing();
                 ImGui.Text("Mode:");
                 ImGui.SameLine();
                 int mode = config.AutoUnfriendMode;
                 ImGui.SetNextItemWidth(230);
                 if (ImGui.Combo("##automode", ref mode, autoModes, autoModes.Length))
-                {
-                    config.AutoUnfriendMode = mode;
-                    SaveConfig();
-                }
+                { config.AutoUnfriendMode = mode; SaveConfig(); }
 
-                // Show next scheduled run
-                var now = DateTime.Now;
-                var target = new DateTime(now.Year, now.Month, now.Day, config.AutoUnfriendHour, config.AutoUnfriendMinute, 0);
-                if (target <= now) target = target.AddDays(1);
+                // ── Next run preview ──────────────────────────────────────────
                 ImGui.Spacing();
-                ImGui.TextColored(new Vector4(0.4f, 0.9f, 0.5f, 1f), $"Next run: {target:ddd dd MMM yyyy HH:mm}");
+                var next = GetNextScheduledRun();
+                if (next.HasValue)
+                {
+                    var col = next.Value < DateTime.Now
+                        ? new Vector4(1f, 0.5f, 0.3f, 1f)   // past = orange warning
+                        : new Vector4(0.4f, 0.9f, 0.5f, 1f); // future = green
+                    ImGui.TextColored(col, $"Next run: {next.Value:ddd dd MMM yyyy  hh:mm tt}");
+                }
+                else
+                {
+                    ImGui.TextColored(new Vector4(1f, 0.5f, 0.3f, 1f), "Next run: invalid date");
+                }
             }
         }
 
         // ─── Auto Scheduler ────────────────────────────────────────────────────────
+        static DateTime? GetNextScheduledRun()
+        {
+            var now = DateTime.Now;
+            int h = config.AutoUnfriendHour, mi = config.AutoUnfriendMinute;
+            try
+            {
+                switch (config.AutoUnfriendScheduleType)
+                {
+                    case 0: // Daily
+                        var daily = new DateTime(now.Year, now.Month, now.Day, h, mi, 0);
+                        if (daily <= now) daily = daily.AddDays(1);
+                        return daily;
+
+                    case 1: // Monthly — next occurrence of day-of-month
+                        int mday = Math.Clamp(config.AutoUnfriendMonthDay, 1, 28); // cap at 28 for safety
+                        var monthly = new DateTime(now.Year, now.Month, mday, h, mi, 0);
+                        if (monthly <= now) monthly = monthly.AddMonths(1);
+                        return monthly;
+
+                    case 2: // Once — specific date
+                        return new DateTime(
+                            config.AutoUnfriendYear, config.AutoUnfriendMonth, config.AutoUnfriendDay,
+                            h, mi, 0);
+
+                    default: return null;
+                }
+            }
+            catch { return null; }
+        }
+
         static void StartAutoScheduler()
         {
             autoCts?.Cancel();
@@ -2105,29 +2221,28 @@ namespace Unfriendmaxxing
             {
                 while (!token.IsCancellationRequested && config.AutoUnfriendEnabled)
                 {
-                    var now = DateTime.Now;
-                    var target = new DateTime(now.Year, now.Month, now.Day, config.AutoUnfriendHour, config.AutoUnfriendMinute, 0);
-                    if (target <= now) target = target.AddDays(1);
+                    var target = GetNextScheduledRun();
+                    if (!target.HasValue || target.Value <= DateTime.Now)
+                    {
+                        // Invalid or past date (Once mode already elapsed) — stop
+                        break;
+                    }
 
-                    try { await Task.Delay(target - now, token); }
+                    try { await Task.Delay(target.Value - DateTime.Now, token); }
                     catch (OperationCanceledException) { break; }
 
                     if (token.IsCancellationRequested) break;
 
-                    // Refresh data then run auto-unfriend
                     try
                     {
                         await Refresh();
 
                         List<SafeLimitedUserFriend> toUnfriend = config.AutoUnfriendMode switch
                         {
-                            // Inactive Only: 3+ months
                             0 => shown.Where(f =>
                                 string.IsNullOrEmpty(f.LastLogin) ||
                                 DateTime.Parse(f.LastLogin) < DateTime.UtcNow.AddMonths(-3)).ToList(),
-                            // All Shown
                             1 => shown.ToList(),
-                            // Marked Only (use current selection)
                             2 => selected.Select(i => shown[i]).ToList(),
                             _ => new List<SafeLimitedUserFriend>()
                         };
@@ -2146,6 +2261,14 @@ namespace Unfriendmaxxing
 
                         ShowToast("Auto-Unfriend", $"Removed {toUnfriend.Count} friends");
                         await Refresh();
+
+                        // Once mode: disable after running
+                        if (config.AutoUnfriendScheduleType == 2)
+                        {
+                            config.AutoUnfriendEnabled = false;
+                            SaveConfig();
+                            break;
+                        }
                     }
                     catch { }
                 }

@@ -1,6 +1,6 @@
 ﻿# VRChat Unfriend Manager (VRC:UFM)
 
-> Copyright © 2025 [Your Name]
+> Copyright © 2025 [hollynt]
 > This work is free. You can redistribute it and/or modify it under the
 > terms of the Do What The Fuck You Want To Public License, Version 2,
 > as published by Sam Hocevar. See the [LICENSE](#-license) section for more details.
