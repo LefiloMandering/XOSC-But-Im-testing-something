@@ -70,6 +70,8 @@ namespace Unfriendmaxxing
         public int AutoUnfriendYear { get; set; } = DateTime.Now.Year;
         public int AutoUnfriendMonth { get; set; } = DateTime.Now.Month;
         public int AutoUnfriendDay { get; set; } = DateTime.Now.Day;
+        // Tracks when auto-unfriend last ran so missed runs can be caught on startup
+        public DateTime? AutoUnfriendLastRun { get; set; } = null;
         public bool RunOnStartup { get; set; } = false;
         public bool VrcxStartupDesktop { get; set; } = false;
         public bool VrcxStartupVr { get; set; } = false;
@@ -861,6 +863,10 @@ namespace Unfriendmaxxing
         static string status = "Starting up...";
         static bool working = false;
         static bool isUnfriending = false;
+        // Auto-unfriend confirmation — scheduler sets these, UI shows the dialog
+        static bool pendingAutoConfirm = false;
+        static int pendingAutoCount = 0;
+        static TaskCompletionSource<bool>? autoConfirmTcs = null;
         static bool isPaused = false;
         static int unfriendTotal = 0;
         static int unfriendDone = 0;
@@ -1416,6 +1422,7 @@ namespace Unfriendmaxxing
                 else DrawLoginScreen();
 
                 api.Draw2FADialog();
+                DrawAutoUnfriendConfirmDialog();
                 ImGui.End();
                 rlImGui.End();
                 Raylib.EndDrawing();
@@ -1993,6 +2000,56 @@ namespace Unfriendmaxxing
         }
 
         // ─── Settings Tab ──────────────────────────────────────────────────────────
+        static void DrawAutoUnfriendConfirmDialog()
+        {
+            if (!pendingAutoConfirm) return;
+
+            ImGui.OpenPopup("##auto_confirm");
+            ImGui.SetNextWindowPos(
+                new Vector2(Raylib.GetScreenWidth() / 2f, Raylib.GetScreenHeight() / 2f),
+                ImGuiCond.Appearing, new Vector2(0.5f, 0.5f));
+            ImGui.SetNextWindowSize(new Vector2(360, 0), ImGuiCond.Appearing);
+
+            bool open = true;
+            if (ImGui.BeginPopupModal("##auto_confirm", ref open, ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoTitleBar))
+            {
+                ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), "⚠  Auto-Unfriend Scheduled Run");
+                ImGui.Separator();
+                ImGui.Spacing();
+                ImGui.TextWrapped($"The scheduler is about to unfriend {pendingAutoCount} friend{(pendingAutoCount == 1 ? "" : "s")}.");
+                ImGui.Spacing();
+                string modeName = config.AutoUnfriendMode switch { 0 => "Inactive Only", 1 => "All Shown", 2 => "Marked Only", _ => "Unknown" };
+                ImGui.TextColored(new Vector4(0.7f, 0.7f, 0.7f, 1f), $"Mode: {modeName}");
+                ImGui.Spacing();
+                ImGui.TextWrapped("Do you want to proceed?");
+                ImGui.Spacing();
+                ImGui.Separator();
+                ImGui.Spacing();
+
+                float btnW = 100;
+                ImGui.SetCursorPosX((ImGui.GetContentRegionAvail().X - btnW * 2 - 10) / 2f + ImGui.GetCursorPosX());
+                if (ImGui.Button("Yes, unfriend", new Vector2(btnW, 0)))
+                {
+                    pendingAutoConfirm = false;
+                    autoConfirmTcs?.TrySetResult(true);
+                    ImGui.CloseCurrentPopup();
+                }
+                ImGui.SameLine();
+                if (ImGui.Button("Cancel", new Vector2(btnW, 0)))
+                {
+                    pendingAutoConfirm = false;
+                    autoConfirmTcs?.TrySetResult(false);
+                    ImGui.CloseCurrentPopup();
+                }
+                ImGui.EndPopup();
+            }
+            else if (!open)
+            {
+                pendingAutoConfirm = false;
+                autoConfirmTcs?.TrySetResult(false);
+            }
+        }
+
         static void DrawSettingsTab()
         {
             ImGui.Spacing();
@@ -2219,60 +2276,140 @@ namespace Unfriendmaxxing
 
             _ = Task.Run(async () =>
             {
+                // ── Missed run check ──────────────────────────────────────────
+                // Only fires if the scheduler has run before (LastRun != null),
+                // and the expected run time passed without a run happening.
+                if (config.AutoUnfriendEnabled && config.AutoUnfriendLastRun != null)
+                {
+                    var lastExpected = GetLastExpectedRun();
+                    bool missedRun = lastExpected.HasValue
+                        && lastExpected.Value < DateTime.Now
+                        && config.AutoUnfriendLastRun < lastExpected.Value;
+
+                    if (missedRun)
+                    {
+                        Console.WriteLine($"[SCHEDULER] Missed run detected (expected {lastExpected:g}), running now");
+                        await RunAutoUnfriendAsync(token);
+                        if (token.IsCancellationRequested) return;
+                    }
+                }
+
+                // ── Normal schedule loop ──────────────────────────────────────
                 while (!token.IsCancellationRequested && config.AutoUnfriendEnabled)
                 {
                     var target = GetNextScheduledRun();
                     if (!target.HasValue || target.Value <= DateTime.Now)
-                    {
-                        // Invalid or past date (Once mode already elapsed) — stop
                         break;
-                    }
 
                     try { await Task.Delay(target.Value - DateTime.Now, token); }
                     catch (OperationCanceledException) { break; }
 
                     if (token.IsCancellationRequested) break;
 
+                    await RunAutoUnfriendAsync(token);
+
+                    if (config.AutoUnfriendScheduleType == 2) // Once — disable after running
+                    {
+                        config.AutoUnfriendEnabled = false;
+                        SaveConfig();
+                        break;
+                    }
+                }
+            }, token);
+        }
+
+        static async Task RunAutoUnfriendAsync(CancellationToken token)
+        {
+            try
+            {
+                await Refresh();
+
+                List<SafeLimitedUserFriend> toUnfriend = config.AutoUnfriendMode switch
+                {
+                    // Inactive Only — uses user's inactive filter setting from Friends tab
+                    0 => shown.Where(f =>
+                        string.IsNullOrEmpty(f.LastLogin) ||
+                        DateTime.Parse(f.LastLogin) < DateTime.UtcNow.AddMonths(-3)).ToList(),
+                    // All Shown — everyone passing the current filters
+                    1 => shown.ToList(),
+                    // Marked Only — uses selected if any are checked, otherwise falls back to All Shown
+                    2 => selected.Count > 0
+                        ? selected.Where(i => i < shown.Count).Select(i => shown[i]).ToList()
+                        : shown.ToList(),
+                    _ => new List<SafeLimitedUserFriend>()
+                };
+
+                if (toUnfriend.Count == 0)
+                {
+                    ShowToast("Auto-Unfriend", "Nothing to unfriend");
+                    config.AutoUnfriendLastRun = DateTime.Now;
+                    SaveConfig();
+                    return;
+                }
+
+                // Ask user to confirm before nuking anyone
+                autoConfirmTcs = new TaskCompletionSource<bool>();
+                pendingAutoCount = toUnfriend.Count;
+                pendingAutoConfirm = true;
+
+                bool confirmed;
+                try { confirmed = await autoConfirmTcs.Task.WaitAsync(TimeSpan.FromMinutes(2), token); }
+                catch { confirmed = false; } // timeout or cancel = skip
+
+                if (!confirmed) { ShowToast("Auto-Unfriend", "Cancelled"); return; }
+
+                foreach (var u in toUnfriend)
+                {
+                    if (token.IsCancellationRequested) break;
                     try
                     {
-                        await Refresh();
-
-                        List<SafeLimitedUserFriend> toUnfriend = config.AutoUnfriendMode switch
-                        {
-                            0 => shown.Where(f =>
-                                string.IsNullOrEmpty(f.LastLogin) ||
-                                DateTime.Parse(f.LastLogin) < DateTime.UtcNow.AddMonths(-3)).ToList(),
-                            1 => shown.ToList(),
-                            2 => selected.Select(i => shown[i]).ToList(),
-                            _ => new List<SafeLimitedUserFriend>()
-                        };
-
-                        foreach (var u in toUnfriend)
-                        {
-                            if (token.IsCancellationRequested) break;
-                            try
-                            {
-                                await api.UnfriendAsync(u.Id);
-                                ShowUnfriendToast(u.DisplayName);
-                                await Task.Delay(Random.Shared.Next(7000, 13000), token);
-                            }
-                            catch { }
-                        }
-
-                        ShowToast("Auto-Unfriend", $"Removed {toUnfriend.Count} friends");
-                        await Refresh();
-
-                        // Once mode: disable after running
-                        if (config.AutoUnfriendScheduleType == 2)
-                        {
-                            config.AutoUnfriendEnabled = false;
-                            SaveConfig();
-                            break;
-                        }
+                        await api.UnfriendAsync(u.Id);
+                        ShowUnfriendToast(u.DisplayName);
+                        await Task.Delay(Random.Shared.Next(7000, 13000), token);
                     }
                     catch { }
                 }
-            }, token);
+
+                ShowToast("Auto-Unfriend", $"Removed {toUnfriend.Count} friends");
+                config.AutoUnfriendLastRun = DateTime.Now;
+                SaveConfig();
+                await Refresh();
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// Returns the most recent scheduled run time that should have already happened.
+        /// Used to detect missed runs.
+        /// </summary>
+        static DateTime? GetLastExpectedRun()
+        {
+            var now = DateTime.Now;
+            int h = config.AutoUnfriendHour, mi = config.AutoUnfriendMinute;
+            try
+            {
+                switch (config.AutoUnfriendScheduleType)
+                {
+                    case 0: // Daily — last occurrence was today or yesterday
+                        var daily = new DateTime(now.Year, now.Month, now.Day, h, mi, 0);
+                        if (daily > now) daily = daily.AddDays(-1);
+                        return daily;
+
+                    case 1: // Monthly — last occurrence this or previous month
+                        int mday = Math.Clamp(config.AutoUnfriendMonthDay, 1, 28);
+                        var monthly = new DateTime(now.Year, now.Month, mday, h, mi, 0);
+                        if (monthly > now) monthly = monthly.AddMonths(-1);
+                        return monthly;
+
+                    case 2: // Once — the specific date itself
+                        return new DateTime(
+                            config.AutoUnfriendYear, config.AutoUnfriendMonth, config.AutoUnfriendDay,
+                            h, mi, 0);
+
+                    default: return null;
+                }
+            }
+            catch { return null; }
         }
 
         // ─── Unfriend Process ──────────────────────────────────────────────────────
