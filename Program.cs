@@ -736,7 +736,7 @@ namespace Unfriendmaxxing
         static bool sessionRestored = false;
         static bool shouldExit = false;
 
-        // P/Invoke for Windows tray
+        // ── Windows P/Invoke ────────────────────────────────────────────────────
         [DllImport("kernel32.dll")] static extern IntPtr GetConsoleWindow();
         [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hWnd, int cmd);
         [DllImport("user32.dll")] static extern IntPtr FindWindow(string? cls, string wnd);
@@ -787,6 +787,7 @@ namespace Unfriendmaxxing
         const uint WM_LBUTTONDBLCLK = 0x203, WM_RBUTTONUP = 0x205, TPM_RIGHTBUTTON = 2;
         const int SW_HIDE = 0, SW_RESTORE = 9; const uint IMAGE_ICON = 1, LR_LOADFROMFILE = 0x10;
 
+        // ── Tray state ──────────────────────────────────────────────────────────
         static bool windowVisible = true;
         static volatile bool _showRequested = false;
         static Thread? trayThread;
@@ -794,6 +795,14 @@ namespace Unfriendmaxxing
         delegate IntPtr WndProcDelegate(IntPtr hwnd, uint msg, IntPtr wp, IntPtr lp);
         static WndProcDelegate? _wndProcDelegate;
 
+        // ── Linux tray state ────────────────────────────────────────────────────
+        static Process? _linuxTrayProcess;
+        static System.Net.Sockets.Socket? _linuxTraySocket;
+        static Thread? _linuxTrayListenerThread;
+        static readonly string _linuxSocketPath =
+            Path.Combine(Path.GetTempPath(), $"vum_tray_{Environment.ProcessId}.sock");
+
+        // ── Window show/hide ────────────────────────────────────────────────────
         static void ShowMainWindow()
         {
             _showRequested = true;
@@ -826,10 +835,13 @@ namespace Unfriendmaxxing
                     ShowWindow(hwnd, 0);
                     ShowWindow(hwnd, 9);
                 }
+                // On Linux the window manager handles taskbar visibility;
+                // hiding the window via HideMainWindow() is sufficient.
             }
             catch { }
         }
 
+        // ── Windows tray WndProc ────────────────────────────────────────────────
         static IntPtr WinTrayWndProc(IntPtr hwnd, uint msg, IntPtr wp, IntPtr lp)
         {
             if (msg == WM_TRAY_CB)
@@ -889,11 +901,21 @@ namespace Unfriendmaxxing
             lock (_trayLock)
             {
                 _trayRunning = false;
+
+                // Kill the Linux tray process if running
+                try { _linuxTrayProcess?.Kill(); } catch { }
+                _linuxTrayProcess = null;
+
+                // Close the Unix socket so the listener thread unblocks
+                try { _linuxTraySocket?.Close(); } catch { }
+                _linuxTraySocket = null;
+
                 trayThread?.Join(3000);
                 trayThread = null;
             }
         }
 
+        // ── Windows tray implementation ─────────────────────────────────────────
         static void RunWindowsTray(bool autostart)
         {
             _wndProcDelegate = WinTrayWndProc;
@@ -936,13 +958,144 @@ namespace Unfriendmaxxing
             if (_winMsgHwnd != IntPtr.Zero) DestroyWindow(_winMsgHwnd);
         }
 
+        // ── Linux tray implementation (pystray via subprocess + Unix socket) ────
         static void RunLinuxTray(bool autostart)
         {
             if (autostart) HideMainWindow();
+
+            // Build the pystray helper script
+            string scriptPath = Path.Combine(Path.GetTempPath(), $"vum_tray_{Environment.ProcessId}.py");
+
+            string iconPath = "icon.png";
+            if (!File.Exists(iconPath)) iconPath = "icon.ico";
+            string absIconPath = File.Exists(iconPath) ? Path.GetFullPath(iconPath) : "";
+
+            // Escape backslashes for the Python string literal (matters on Wine/Windows paths)
+            string pySocketPath = _linuxSocketPath.Replace("\\", "\\\\");
+            string pyIconPath   = absIconPath.Replace("\\", "\\\\");
+
+            string script = $@"
+import sys, socket, os, threading
+try:
+    import pystray
+    from PIL import Image, ImageDraw
+except ImportError:
+    sys.exit(42)
+
+SOCK = ""{pySocketPath}""
+ICON = ""{pyIconPath}""
+
+def load_icon():
+    if ICON and os.path.exists(ICON):
+        try:
+            return Image.open(ICON).resize((64, 64)).convert('RGBA')
+        except:
+            pass
+    img = Image.new('RGBA', (64, 64), (80, 40, 140, 255))
+    d = ImageDraw.Draw(img)
+    d.ellipse([8, 8, 56, 56], fill=(160, 100, 220, 255))
+    return img
+
+def send_cmd(cmd):
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(SOCK)
+        s.sendall(cmd.encode())
+        s.close()
+    except:
+        pass
+
+def on_show(icon, item): send_cmd('show')
+def on_exit(icon, item):
+    send_cmd('exit')
+    icon.stop()
+
+menu = pystray.Menu(
+    pystray.MenuItem('Show', on_show, default=True),
+    pystray.MenuItem('Exit', on_exit),
+)
+tray = pystray.Icon('VRChat Unfriend Manager', load_icon(), 'VRChat Unfriend Manager', menu)
+tray.run()
+";
+            File.WriteAllText(scriptPath, script);
+
+            // Set up the Unix domain socket server so the tray script can send us commands
+            if (File.Exists(_linuxSocketPath)) File.Delete(_linuxSocketPath);
+            var unixEp = new System.Net.Sockets.UnixDomainSocketEndPoint(_linuxSocketPath);
+            _linuxTraySocket = new System.Net.Sockets.Socket(
+                System.Net.Sockets.AddressFamily.Unix,
+                System.Net.Sockets.SocketType.Stream,
+                System.Net.Sockets.ProtocolType.Unspecified);
+            _linuxTraySocket.Bind(unixEp);
+            _linuxTraySocket.Listen(4);
+
+            // Listener thread – receives "show" / "exit" from the Python script
+            _linuxTrayListenerThread = new Thread(() =>
+            {
+                while (_trayRunning)
+                {
+                    System.Net.Sockets.Socket? client = null;
+                    try
+                    {
+                        // Accept blocks until a client connects or the socket is closed
+                        client = _linuxTraySocket.Accept();
+                    }
+                    catch
+                    {
+                        // Socket was closed – tray is stopping
+                        break;
+                    }
+
+                    try
+                    {
+                        var buf = new byte[64];
+                        int n = client.Receive(buf);
+                        var cmd = Encoding.UTF8.GetString(buf, 0, n).Trim();
+                        if (cmd == "show") ShowMainWindow();
+                        else if (cmd == "exit") shouldExit = true;
+                    }
+                    catch { }
+                    finally { try { client?.Close(); } catch { } }
+                }
+            }) { IsBackground = true };
+            _linuxTrayListenerThread.Start();
+
+            // Launch the Python tray process
+            var psi = new ProcessStartInfo
+            {
+                FileName = "python3",
+                Arguments = $"\"{scriptPath}\"",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+
+            try
+            {
+                _linuxTrayProcess = Process.Start(psi);
+                _linuxTrayProcess?.WaitForExit();
+
+                int exitCode = _linuxTrayProcess?.ExitCode ?? -1;
+                if (exitCode == 42)
+                {
+                    Console.WriteLine("[TRAY] pystray / Pillow not found — tray icon unavailable.");
+                    Console.WriteLine("[TRAY] Install with:  pip install pystray pillow");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[TRAY] Failed to launch tray helper: {ex.Message}");
+            }
+            finally
+            {
+                _trayRunning = false;
+                try { File.Delete(scriptPath); } catch { }
+                try { File.Delete(_linuxSocketPath); } catch { }
+                try { _linuxTraySocket?.Close(); } catch { }
+            }
         }
 
-        static void SetLinuxTrayVisible(bool visible) { }
-
+        // ── Main ────────────────────────────────────────────────────────────────
         public static async Task Main(string[] args)
         {
             bool isAutostart = args.Contains("--autostart");
@@ -1676,7 +1829,7 @@ namespace Unfriendmaxxing
             }
 
             bool hideInTaskbar = config.HideInTaskbar;
-            if (ImGui.Checkbox("Hide in taskbar", ref hideInTaskbar))
+            if (ImGui.Checkbox("Hide in taskbar / show tray icon", ref hideInTaskbar))
             {
                 config.HideInTaskbar = hideInTaskbar;
                 SaveConfig();
@@ -1694,6 +1847,13 @@ namespace Unfriendmaxxing
                         if (!windowVisible) ShowMainWindow();
                     });
                 }
+            }
+
+            // On Linux, remind the user about the pystray dependency
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            {
+                ImGui.SameLine();
+                ImGui.TextDisabled("(needs: pip install pystray pillow)");
             }
 
             if (Directory.Exists(Paths.VrcxStartup))
