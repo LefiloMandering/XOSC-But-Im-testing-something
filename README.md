@@ -1,6 +1,6 @@
 ﻿# XOSC - VRChat OSC Tool (Linux)
 
-![Preview](https://gitlab.com/hollyntii/vrclinuxchatbox/-/raw/main/Screenshot_20260415_182633.png)
+![Preview](https://github.com/hollyntt/XOSC/blob/master/Product%20Images/Screenshot_20260418_225445.png?raw=true)
 
 XOSC is a high-performance, native C# OSC manager designed specifically for VRChat users on Linux (Fedora, Arch, Steam Deck). It provides a sleek ImGui-based interface to manage your chatbox, music, and hardware telemetry without the overhead of heavy scripts or external Python dependencies.
 
