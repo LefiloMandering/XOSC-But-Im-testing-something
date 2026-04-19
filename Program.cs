@@ -20,7 +20,7 @@ namespace XOSC
 {
     public class AppConfig
     {
-        public string Version = "2.0.1-linux";
+        public string Version = "1.2.3-linux";
         public bool ChatboxEnabled = true;
         public int Interval = 5;
         public string City = "Springfield,IL";
