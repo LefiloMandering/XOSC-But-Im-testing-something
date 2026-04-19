@@ -1,7 +1,19 @@
+# Build and Publish folders
 bin/
 obj/
-/packages/
+publish/
+
+# IDE and Project files
+.idea/
+.vs/
+*.user
+*.userosscache
 riderModule.iml
-/_ReSharper.Caches/
+_ReSharper.Caches/
+
+# Custom Scripts and backups
 publish.sh
 *.bak
+
+# Manifests (if you want it hidden)
+app.manifest
