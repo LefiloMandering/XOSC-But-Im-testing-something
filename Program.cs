@@ -22,7 +22,7 @@ namespace XOSC
 {
     public class AppConfig
     {
-        public string Version = "2.0.0-linux-rel";
+        public string Version = "2.0.1-linux-rel";
         public bool ChatboxEnabled = true;
         public int Interval = 1;
         public string City = "";
@@ -164,6 +164,47 @@ namespace XOSC
         }
     }
 
+    public static class VrchatService
+    {
+        private static readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(5) };
+        public static string CurrentWorldPing = "--";
+        public static string CurrentWorldName = "";
+        private static DateTime _lastPing = DateTime.MinValue;
+
+        public static async Task FetchWorldPing()
+        {
+            if ((DateTime.Now - _lastPing).TotalSeconds < 30) return;
+            _lastPing = DateTime.Now;
+            try
+            {
+                if (string.IsNullOrEmpty(Program.Config.Cookie)) return;
+                var req = new HttpRequestMessage(HttpMethod.Get, "https://api.vrchat.cloud/api/1/auth/user");
+                req.Headers.Add("Cookie", Program.Config.Cookie);
+                req.Headers.Add("User-Agent", "XOSC/2.0");
+                var resp = await _http.SendAsync(req);
+                if (!resp.IsSuccessStatusCode) return;
+
+                using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+                string loc = doc.RootElement.GetProperty("location").GetString() ?? "";
+                if (string.IsNullOrEmpty(loc) || loc == "offline") return;
+
+                string worldId = loc.Split(':')[0];
+                var sw = Stopwatch.StartNew();
+                var req2 = new HttpRequestMessage(HttpMethod.Get, $"https://api.vrchat.cloud/api/1/worlds/{worldId}");
+                req2.Headers.Add("Cookie", Program.Config.Cookie);
+                var resp2 = await _http.SendAsync(req2);
+                sw.Stop();
+
+                if (resp2.IsSuccessStatusCode)
+                {
+                    using var doc2 = JsonDocument.Parse(await resp2.Content.ReadAsStringAsync());
+                    CurrentWorldName = doc2.RootElement.GetProperty("name").GetString() ?? "";
+                    CurrentWorldPing = $"{sw.ElapsedMilliseconds}ms";
+                }
+            } catch { }
+        }
+    }
+
     public static class Updater
     {
         public static string Status = "idle";
@@ -192,10 +233,10 @@ namespace XOSC
                 using var ms = new MemoryStream(zipData);
                 using var archive = new ZipArchive(ms);
                 
-                // Specifically targeting the linux binary path inside the zip structure
                 var entry = archive.GetEntry("linux-x64/XOSC");
+                if (entry == null) entry = archive.GetEntry("XOSC");
 
-                if (entry == null) { Status = "linux-x64/XOSC not found in zip"; return; }
+                if (entry == null) { Status = "XOSC not found in zip"; return; }
 
                 string self = Environment.ProcessPath ?? "";
                 var localTime = File.GetLastWriteTimeUtc(self);
@@ -279,8 +320,8 @@ namespace XOSC
                 _music = FetchMusic();
                 if (cfg.WeatherMode && !string.IsNullOrEmpty(cfg.City)) 
                     _weather = (await new HttpClient().GetStringAsync($"https://wttr.in/{cfg.City}?format=%C+%t")).Trim();
-                if (cfg.AutoCycleStatus && cfg.StatusList.Count > 0) 
-                    lock (ListLock) { _statusIdx = (_statusIdx + 1) % cfg.StatusList.Count; }
+                if (cfg.VrcPingMode) await VrchatService.FetchWorldPing();
+                lock (ListLock) { if (cfg.AutoCycleStatus && cfg.StatusList.Count > 0) _statusIdx = (_statusIdx + 1) % cfg.StatusList.Count; }
                 _lastRefresh = DateTime.Now;
             }
 
@@ -311,10 +352,19 @@ namespace XOSC
                     lines.Add(m);
                 }
             }
-            if (cfg.NetMode) lines.Add($"🌐 {GetPing()}ms");
+            if (cfg.NetMode) lines.Add($"🌐 {GetPing()}ms" + (cfg.VrcPingMode ? $" | 🌍 {VrchatService.CurrentWorldPing}" : ""));
             if (cfg.SongMode && _music != "Chilling") lines.Add($"♪ {_music}");
 
-            SendOsc("/chatbox/input", string.Join("\n", lines));
+            string output = string.Join("\n", lines);
+            
+            // THIN MODE LOGIC: Must be the absolute final sequence and within character limits
+            if (cfg.ThinMode) 
+            {
+                if (output.Length > 138) output = output.Substring(0, 138);
+                output += "\u0003\u001f";
+            }
+
+            SendOsc("/chatbox/input", output);
             _lastSent = DateTime.Now; PacketsSent++; EngineState = "Idle";
         }
 
@@ -337,13 +387,23 @@ namespace XOSC
                 using var p = Process.Start(psi);
                 string r = p?.StandardOutput.ReadToEnd().Trim() ?? "";
                 if (!string.IsNullOrEmpty(r) && r != " - ") return r;
+                var x = new ProcessStartInfo("xdotool", "search --name \" - \"") { RedirectStandardOutput = true, UseShellExecute = false };
+                using var px = Process.Start(x);
+                string[] ids = px?.StandardOutput.ReadToEnd().Split('\n', StringSplitOptions.RemoveEmptyEntries) ?? Array.Empty<string>();
+                foreach (var id in ids) {
+                    var xn = new ProcessStartInfo("xdotool", $"getwindowname {id}") { RedirectStandardOutput = true, UseShellExecute = false };
+                    using var pn = Process.Start(xn);
+                    string t = pn?.StandardOutput.ReadToEnd().Trim() ?? "";
+                    if (t.Contains("SoundCloud") || t.Contains("Spotify") || t.Contains("YouTube")) return Regex.Replace(t, @" - (SoundCloud|YouTube|Spotify).*", "").Trim();
+                }
                 return "Chilling";
             } catch { return "Chilling"; }
         }
 
         private static void ScrapeHardwareNames()
         {
-            string p = "/home/soap/.local/share/Steam/steamapps/compatdata/438100/pfx/drive_c/users/steamuser/AppData/LocalLow/VRChat/VRChat";
+            string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            string p = Path.Combine(home, ".local/share/Steam/steamapps/compatdata/438100/pfx/drive_c/users/steamuser/AppData/LocalLow/VRChat/VRChat");
             if (Directory.Exists(p)) {
                 var log = Directory.GetFiles(p, "output_log_*.txt").OrderByDescending(File.GetLastWriteTime).FirstOrDefault();
                 if (log != null) foreach (var l in File.ReadLines(log).Take(1500)) {
@@ -372,7 +432,7 @@ namespace XOSC
 
         public static void Main()
         {
-            _mtx = new Mutex(true, "XOSC_VRC_Unique_REL_203", out bool fresh);
+            _mtx = new Mutex(true, "XOSC_VRC_Unique_REL_204", out bool fresh);
             if (!fresh) Environment.Exit(0);
             Directory.CreateDirectory("/home/soap/xosc");
             LoadConfig();
@@ -403,6 +463,8 @@ namespace XOSC
                 bool active = _navPage == i; ImGui.PushStyleColor(ImGuiCol.Button, active ? new Vector4(0.38f, 0.73f, 1.00f, 0.13f) : Vector4.Zero); ImGui.PushStyleColor(ImGuiCol.Text, active ? ColAccent : new Vector4(0.72f, 0.72f, 0.80f, 1f));
                 ImGui.SetCursorPosX(10); if (ImGui.Button(_navLabels[i], new Vector2(152, 36))) _navPage = i; ImGui.PopStyleColor(2);
             }
+            ImGui.SetCursorPosY(sh - 50); ImGui.SetCursorPosX(20);
+            ImGui.TextColored(Config.ChatboxEnabled ? new Vector4(0.35f, 0.95f, 0.55f, 1f) : new Vector4(1f, 0.33f, 0.33f, 1f), Config.ChatboxEnabled ? "● Live" : "● Paused");
             ImGui.EndChild(); ImGui.PopStyleColor();
             ImGui.SameLine();
             ImGui.PushStyleColor(ImGuiCol.ChildBg, ColBg);
@@ -453,12 +515,14 @@ namespace XOSC
             }
             ImGui.EndChild(); ImGui.PopStyleColor(); ImGui.End();
         }
+
         static void Card(string t, Action d) {
             ImGui.SetCursorPosX(24); ImGui.TextColored(new Vector4(0.92f, 0.92f, 0.97f, 1f), t); ImGui.Dummy(new Vector2(0, 8));
             ImGui.SetCursorPosX(24); ImGui.PushStyleColor(ImGuiCol.ChildBg, ColCard);
             ImGui.BeginChild($"##c{t}", new Vector2(ImGui.GetContentRegionAvail().X - 48, 0), ImGuiChildFlags.Borders | ImGuiChildFlags.AutoResizeY);
             ImGui.Dummy(new Vector2(0, 10)); d(); ImGui.Dummy(new Vector2(0, 10)); ImGui.EndChild(); ImGui.PopStyleColor();
         }
+
         static void Toggle(string l, ref bool v) { if (ImGui.Checkbox(l, ref v)) SaveConfig(); }
         static void SaveConfig() { try { var options = new JsonSerializerOptions { WriteIndented = true, IncludeFields = true }; File.WriteAllText(_path, JsonSerializer.Serialize(Config, options)); } catch { } }
         static void LoadConfig() { if (!File.Exists(_path)) return; try { var options = new JsonSerializerOptions { IncludeFields = true }; var loaded = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(_path), options); if (loaded != null) Config = loaded; } catch { } }
