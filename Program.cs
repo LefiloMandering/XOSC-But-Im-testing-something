@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Text.RegularExpressions;
 using System.Numerics;
 using Raylib_cs;
@@ -22,7 +23,7 @@ namespace XOSC
 {
     public class AppConfig
     {
-        public string Version = "2.0.1-linux-rel";
+        public string Version = "2.0.2-linux-rel";
         public bool ChatboxEnabled = true;
         public int Interval = 1;
         public string City = "";
@@ -216,44 +217,67 @@ namespace XOSC
         public static async Task CheckForUpdates()
         {
             Status = "checking GitHub...";
+            NewVersionFound = false;
             try
             {
+                using var http = new HttpClient();
+                http.DefaultRequestHeaders.CacheControl = new CacheControlHeaderValue { NoCache = true };
+                http.DefaultRequestHeaders.Add("User-Agent", "XOSC-Updater");
+
                 string downloadUrl = BetaUrl;
+                
                 if (!Program.Config.BetaOptIn)
                 {
-                    using var httpStable = new HttpClient();
-                    httpStable.DefaultRequestHeaders.Add("User-Agent", "XOSC-Updater");
-                    var respStable = await httpStable.GetStringAsync(StableApiUrl);
+                    var respStable = await http.GetStringAsync(StableApiUrl);
                     using var doc = JsonDocument.Parse(respStable);
-                    downloadUrl = doc.RootElement.GetProperty("assets")[0].GetProperty("browser_download_url").GetString() ?? BetaUrl;
+                    string remoteVer = doc.RootElement.GetProperty("tag_name").GetString() ?? "";
+                    
+                    if (remoteVer != Program.Config.Version)
+                    {
+                        downloadUrl = doc.RootElement.GetProperty("assets")[0].GetProperty("browser_download_url").GetString() ?? BetaUrl;
+                    }
+                    else
+                    {
+                        Status = "already up to date";
+                        return;
+                    }
                 }
 
-                using var http = new HttpClient();
                 var zipData = await http.GetByteArrayAsync(downloadUrl);
                 using var ms = new MemoryStream(zipData);
                 using var archive = new ZipArchive(ms);
-                
-                var entry = archive.GetEntry("linux-x64/XOSC");
-                if (entry == null) entry = archive.GetEntry("XOSC");
+                var entry = archive.GetEntry("linux-x64/XOSC") ?? archive.GetEntry("XOSC");
 
-                if (entry == null) { Status = "XOSC not found in zip"; return; }
+                if (entry == null) { Status = "XOSC binary not found in zip"; return; }
 
                 string self = Environment.ProcessPath ?? "";
-                var localTime = File.GetLastWriteTimeUtc(self);
+                var selfInfo = new FileInfo(self);
 
-                if (entry.LastWriteTime.UtcDateTime > localTime.AddSeconds(10)) 
+                if (Program.Config.BetaOptIn)
                 {
-                    Status = "New version available!";
+                    if (entry.Length != selfInfo.Length || entry.LastWriteTime.UtcDateTime > selfInfo.LastWriteTimeUtc.AddSeconds(10))
+                    {
+                        Status = "New Beta found!";
+                        NewVersionFound = true;
+                    }
+                    else
+                    {
+                        Status = "already up to date";
+                        return;
+                    }
+                }
+                else
+                {
+                    Status = "New Stable found!";
                     NewVersionFound = true;
+                }
+
+                if (NewVersionFound)
+                {
                     using var es = entry.Open();
                     using var msWrite = new MemoryStream();
                     await es.CopyToAsync(msWrite);
                     _pendingData = msWrite.ToArray();
-                }
-                else
-                {
-                    Status = "Already up to date";
-                    NewVersionFound = false;
                 }
             }
             catch (Exception e) { Status = $"error: {e.Message}"; }
@@ -325,7 +349,7 @@ namespace XOSC
                 _lastRefresh = DateTime.Now;
             }
 
-            if ((DateTime.Now - _lastSent).TotalSeconds < Math.Max(cfg.Interval, 2)) return;
+            if ((DateTime.Now - _lastSent).TotalSeconds < Math.Max(cfg.Interval, 1.5)) return;
 
             var lines = new List<string>();
             lock (ListLock) { if (cfg.StatusTextMode && cfg.StatusList.Count > _statusIdx) lines.Add(cfg.StatusList[_statusIdx]); }
@@ -356,13 +380,7 @@ namespace XOSC
             if (cfg.SongMode && _music != "Chilling") lines.Add($"♪ {_music}");
 
             string output = string.Join("\n", lines);
-            
-            // THIN MODE LOGIC: Must be the absolute final sequence and within character limits
-            if (cfg.ThinMode) 
-            {
-                if (output.Length > 138) output = output.Substring(0, 138);
-                output += "\u0003\u001f";
-            }
+            if (cfg.ThinMode) { if (output.Length > 138) output = output.Substring(0, 138); output += "\u0003\u001f"; }
 
             SendOsc("/chatbox/input", output);
             _lastSent = DateTime.Now; PacketsSent++; EngineState = "Idle";
@@ -387,23 +405,13 @@ namespace XOSC
                 using var p = Process.Start(psi);
                 string r = p?.StandardOutput.ReadToEnd().Trim() ?? "";
                 if (!string.IsNullOrEmpty(r) && r != " - ") return r;
-                var x = new ProcessStartInfo("xdotool", "search --name \" - \"") { RedirectStandardOutput = true, UseShellExecute = false };
-                using var px = Process.Start(x);
-                string[] ids = px?.StandardOutput.ReadToEnd().Split('\n', StringSplitOptions.RemoveEmptyEntries) ?? Array.Empty<string>();
-                foreach (var id in ids) {
-                    var xn = new ProcessStartInfo("xdotool", $"getwindowname {id}") { RedirectStandardOutput = true, UseShellExecute = false };
-                    using var pn = Process.Start(xn);
-                    string t = pn?.StandardOutput.ReadToEnd().Trim() ?? "";
-                    if (t.Contains("SoundCloud") || t.Contains("Spotify") || t.Contains("YouTube")) return Regex.Replace(t, @" - (SoundCloud|YouTube|Spotify).*", "").Trim();
-                }
                 return "Chilling";
             } catch { return "Chilling"; }
         }
 
         private static void ScrapeHardwareNames()
         {
-            string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            string p = Path.Combine(home, ".local/share/Steam/steamapps/compatdata/438100/pfx/drive_c/users/steamuser/AppData/LocalLow/VRChat/VRChat");
+            string p = "/home/soap/.local/share/Steam/steamapps/compatdata/438100/pfx/drive_c/users/steamuser/AppData/LocalLow/VRChat/VRChat";
             if (Directory.Exists(p)) {
                 var log = Directory.GetFiles(p, "output_log_*.txt").OrderByDescending(File.GetLastWriteTime).FirstOrDefault();
                 if (log != null) foreach (var l in File.ReadLines(log).Take(1500)) {
@@ -463,8 +471,6 @@ namespace XOSC
                 bool active = _navPage == i; ImGui.PushStyleColor(ImGuiCol.Button, active ? new Vector4(0.38f, 0.73f, 1.00f, 0.13f) : Vector4.Zero); ImGui.PushStyleColor(ImGuiCol.Text, active ? ColAccent : new Vector4(0.72f, 0.72f, 0.80f, 1f));
                 ImGui.SetCursorPosX(10); if (ImGui.Button(_navLabels[i], new Vector2(152, 36))) _navPage = i; ImGui.PopStyleColor(2);
             }
-            ImGui.SetCursorPosY(sh - 50); ImGui.SetCursorPosX(20);
-            ImGui.TextColored(Config.ChatboxEnabled ? new Vector4(0.35f, 0.95f, 0.55f, 1f) : new Vector4(1f, 0.33f, 0.33f, 1f), Config.ChatboxEnabled ? "● Live" : "● Paused");
             ImGui.EndChild(); ImGui.PopStyleColor();
             ImGui.SameLine();
             ImGui.PushStyleColor(ImGuiCol.ChildBg, ColBg);
