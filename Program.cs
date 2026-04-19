@@ -140,10 +140,10 @@ namespace XOSC
                 string hwmon = $"{gpu}/device/hwmon/";
                 if (Directory.Exists(hwmon))
                 {
-                    var hDirs = Directory.GetDirectories(hwmon);
-                    if (hDirs.Length > 0 && File.Exists($"{hDirs[0]}/temp1_input"))
+                    var hdirs = Directory.GetDirectories(hwmon);
+                    if (hdirs.Length > 0 && File.Exists($"{hdirs[0]}/temp1_input"))
                     {
-                        int c = int.Parse(File.ReadAllText($"{hDirs[0]}/temp1_input").Trim()) / 1000;
+                        int c = int.Parse(File.ReadAllText($"{hdirs[0]}/temp1_input").Trim()) / 1000;
                         temp = tUnit == "°C" ? $"{c}°C" : $"{(c * 9 / 5) + 32}°F";
                     }
                 }
@@ -165,52 +165,12 @@ namespace XOSC
         }
     }
 
-    public static class VrchatService
-    {
-        private static readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(5) };
-        public static string CurrentWorldPing = "--";
-        public static string CurrentWorldName = "";
-        private static DateTime _lastPing = DateTime.MinValue;
-
-        public static async Task FetchWorldPing()
-        {
-            if ((DateTime.Now - _lastPing).TotalSeconds < 30) return;
-            _lastPing = DateTime.Now;
-            try
-            {
-                if (string.IsNullOrEmpty(Program.Config.Cookie)) return;
-                var req = new HttpRequestMessage(HttpMethod.Get, "https://api.vrchat.cloud/api/1/auth/user");
-                req.Headers.Add("Cookie", Program.Config.Cookie);
-                req.Headers.Add("User-Agent", "XOSC/2.0");
-                var resp = await _http.SendAsync(req);
-                if (!resp.IsSuccessStatusCode) return;
-
-                using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
-                string loc = doc.RootElement.GetProperty("location").GetString() ?? "";
-                if (string.IsNullOrEmpty(loc) || loc == "offline") return;
-
-                string worldId = loc.Split(':')[0];
-                var sw = Stopwatch.StartNew();
-                var req2 = new HttpRequestMessage(HttpMethod.Get, $"https://api.vrchat.cloud/api/1/worlds/{worldId}");
-                req2.Headers.Add("Cookie", Program.Config.Cookie);
-                var resp2 = await _http.SendAsync(req2);
-                sw.Stop();
-
-                if (resp2.IsSuccessStatusCode)
-                {
-                    using var doc2 = JsonDocument.Parse(await resp2.Content.ReadAsStringAsync());
-                    CurrentWorldName = doc2.RootElement.GetProperty("name").GetString() ?? "";
-                    CurrentWorldPing = $"{sw.ElapsedMilliseconds}ms";
-                }
-            } catch { }
-        }
-    }
-
     public static class Updater
     {
         public static string Status = "idle";
         public static bool NewVersionFound = false;
         private static byte[]? _pendingData;
+        private static string _detectedVersion = "";
         private const string BetaUrl = "https://github.com/hollyntt/XOSC/raw/refs/heads/master/publish/XOSC.zip";
         private const string StableApiUrl = "https://api.github.com/repos/hollyntt/XOSC/releases/latest";
 
@@ -225,22 +185,13 @@ namespace XOSC
                 http.DefaultRequestHeaders.Add("User-Agent", "XOSC-Updater");
 
                 string downloadUrl = BetaUrl;
-                
                 if (!Program.Config.BetaOptIn)
                 {
                     var respStable = await http.GetStringAsync(StableApiUrl);
                     using var doc = JsonDocument.Parse(respStable);
-                    string remoteVer = doc.RootElement.GetProperty("tag_name").GetString() ?? "";
-                    
-                    if (remoteVer != Program.Config.Version)
-                    {
-                        downloadUrl = doc.RootElement.GetProperty("assets")[0].GetProperty("browser_download_url").GetString() ?? BetaUrl;
-                    }
-                    else
-                    {
-                        Status = "already up to date";
-                        return;
-                    }
+                    _detectedVersion = doc.RootElement.GetProperty("tag_name").GetString() ?? "";
+                    if (_detectedVersion == Program.Config.Version) { Status = "already up to date"; return; }
+                    downloadUrl = doc.RootElement.GetProperty("assets")[0].GetProperty("browser_download_url").GetString() ?? BetaUrl;
                 }
 
                 var zipData = await http.GetByteArrayAsync(downloadUrl);
@@ -248,29 +199,22 @@ namespace XOSC
                 using var archive = new ZipArchive(ms);
                 var entry = archive.GetEntry("linux-x64/XOSC") ?? archive.GetEntry("XOSC");
 
-                if (entry == null) { Status = "XOSC binary not found in zip"; return; }
+                if (entry == null) { Status = "binary not found in zip"; return; }
 
                 string self = Environment.ProcessPath ?? "";
                 var selfInfo = new FileInfo(self);
 
                 if (Program.Config.BetaOptIn)
                 {
-                    if (entry.Length != selfInfo.Length || entry.LastWriteTime.UtcDateTime > selfInfo.LastWriteTimeUtc.AddSeconds(10))
+                    if (entry.Length != selfInfo.Length || entry.LastWriteTime.UtcDateTime > selfInfo.LastWriteTimeUtc.AddSeconds(5))
                     {
-                        Status = "New Beta found!";
+                        Status = "New Beta Found!";
                         NewVersionFound = true;
+                        _detectedVersion = Program.Config.Version + "-beta";
                     }
-                    else
-                    {
-                        Status = "already up to date";
-                        return;
-                    }
+                    else { Status = "already up to date"; return; }
                 }
-                else
-                {
-                    Status = "New Stable found!";
-                    NewVersionFound = true;
-                }
+                else { Status = $"Update Found: {_detectedVersion}"; NewVersionFound = true; }
 
                 if (NewVersionFound)
                 {
@@ -289,9 +233,15 @@ namespace XOSC
             try
             {
                 string self = Environment.ProcessPath ?? "";
+                
+                // Upgrade config version before restarting
+                Program.Config.Version = _detectedVersion;
+                Program.SaveConfig();
+
                 File.Move(self, self + ".bak", true);
                 File.WriteAllBytes(self, _pendingData);
                 Process.Start("chmod", $"+x \"{self}\"").WaitForExit();
+                
                 Status = "restarting...";
                 Thread.Sleep(500);
                 Process.Start(new ProcessStartInfo(self) { UseShellExecute = true });
@@ -321,9 +271,7 @@ namespace XOSC
             ScrapeHardwareNames();
             Task.Run(() => Loop(_cts.Token));
         }
-
         public static void SetManual(string m) { _manualMsg = m; _manualExpiry = DateTime.Now.AddSeconds(20); }
-
         private static async Task Loop(CancellationToken t)
         {
             while (!t.IsCancellationRequested)
@@ -332,35 +280,28 @@ namespace XOSC
                 await Task.Delay(1000, t);
             }
         }
-
         private static async Task Update()
         {
             var cfg = Program.Config;
             if (DateTime.Now < _manualExpiry) { EngineState = "Manual"; SendOsc("/chatbox/input", $"💬 {_manualMsg}"); return; }
-
             if ((DateTime.Now - _lastRefresh).TotalSeconds >= cfg.Interval)
             {
                 EngineState = "Refresh";
                 _music = FetchMusic();
                 if (cfg.WeatherMode && !string.IsNullOrEmpty(cfg.City)) 
                     _weather = (await new HttpClient().GetStringAsync($"https://wttr.in/{cfg.City}?format=%C+%t")).Trim();
-                if (cfg.VrcPingMode) await VrchatService.FetchWorldPing();
                 lock (ListLock) { if (cfg.AutoCycleStatus && cfg.StatusList.Count > 0) _statusIdx = (_statusIdx + 1) % cfg.StatusList.Count; }
                 _lastRefresh = DateTime.Now;
             }
-
             if ((DateTime.Now - _lastSent).TotalSeconds < Math.Max(cfg.Interval, 1.5)) return;
-
             var lines = new List<string>();
             lock (ListLock) { if (cfg.StatusTextMode && cfg.StatusList.Count > _statusIdx) lines.Add(cfg.StatusList[_statusIdx]); }
             if (cfg.PronounsMode && !string.IsNullOrEmpty(cfg.Pronouns)) lines.Add($"{cfg.StatusIcon} {cfg.Pronouns}");
-
             var env = new List<string>();
             if (cfg.TimeMode) env.Add($"🕒 {DateTime.Now:hh:mm tt}");
             if (cfg.DistroMode) env.Add($"| 🐧 Fedora");
             if (cfg.WeatherMode) env.Add($"| 🌤️ {_weather}");
             if (env.Count > 0) lines.Add(string.Join(" ", env));
-
             if (cfg.PcMode)
             {
                 var g = HardwareService.GetGpuStats(cfg.GpuUnit, cfg.VramUnit, cfg.TempUnit);
@@ -376,28 +317,21 @@ namespace XOSC
                     lines.Add(m);
                 }
             }
-            if (cfg.NetMode) lines.Add($"🌐 {GetPing()}ms" + (cfg.VrcPingMode ? $" | 🌍 {VrchatService.CurrentWorldPing}" : ""));
+            if (cfg.NetMode) lines.Add($"🌐 {GetPing()}ms");
             if (cfg.SongMode && _music != "Chilling") lines.Add($"♪ {_music}");
-
             string output = string.Join("\n", lines);
             if (cfg.ThinMode) { if (output.Length > 138) output = output.Substring(0, 138); output += "\u0003\u001f"; }
-
             SendOsc("/chatbox/input", output);
             _lastSent = DateTime.Now; PacketsSent++; EngineState = "Idle";
         }
-
         private static void SendOsc(string addr, string text)
         {
-            try {
-                List<byte> p = new();
-                void Add(string s) { byte[] b = Encoding.UTF8.GetBytes(s); p.AddRange(b); p.Add(0); while (p.Count % 4 != 0) p.Add(0); }
+            try { List<byte> p = new(); void Add(string s) { byte[] b = Encoding.UTF8.GetBytes(s); p.AddRange(b); p.Add(0); while (p.Count % 4 != 0) p.Add(0); }
                 Add(addr); Add(",sTT"); Add(text);
                 _client.Send(p.ToArray(), p.Count, "127.0.0.1", 9000);
             } catch { }
         }
-
         private static string GetPing() { try { return new System.Net.NetworkInformation.Ping().Send("1.1.1.1", 300).RoundtripTime.ToString(); } catch { return "--"; } }
-        
         private static string FetchMusic()
         {
             try {
@@ -408,7 +342,6 @@ namespace XOSC
                 return "Chilling";
             } catch { return "Chilling"; }
         }
-
         private static void ScrapeHardwareNames()
         {
             string p = "/home/soap/.local/share/Steam/steamapps/compatdata/438100/pfx/drive_c/users/steamuser/AppData/LocalLow/VRChat/VRChat";
@@ -420,7 +353,6 @@ namespace XOSC
                 }
             }
         }
-
         private static string Stylize(string t) {
             string n = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", s = "ᵃᵇᶜᵈᵉᶠᵍʰᶦʲᵏˡᵐⁿᵒᵖᵠʳˢᵗᵘᵛʷˣʸᶻᵃᵇᶜᵈᵉᶠᵍʰᶦʲᵏˡᵐⁿᵒᵖᵠʳˢᵗᵘᵛʷˣʸᶻ⁰¹²³⁴⁵⁶⁷⁸⁹";
             StringBuilder sb = new();
@@ -440,7 +372,7 @@ namespace XOSC
 
         public static void Main()
         {
-            _mtx = new Mutex(true, "XOSC_VRC_Unique_REL_204", out bool fresh);
+            _mtx = new Mutex(true, "XOSC_VRC_Unique_REL_205", out bool fresh);
             if (!fresh) Environment.Exit(0);
             Directory.CreateDirectory("/home/soap/xosc");
             LoadConfig();
@@ -530,7 +462,7 @@ namespace XOSC
         }
 
         static void Toggle(string l, ref bool v) { if (ImGui.Checkbox(l, ref v)) SaveConfig(); }
-        static void SaveConfig() { try { var options = new JsonSerializerOptions { WriteIndented = true, IncludeFields = true }; File.WriteAllText(_path, JsonSerializer.Serialize(Config, options)); } catch { } }
+        public static void SaveConfig() { try { Directory.CreateDirectory(Path.GetDirectoryName(_path)); var options = new JsonSerializerOptions { WriteIndented = true, IncludeFields = true }; File.WriteAllText(_path, JsonSerializer.Serialize(Config, options)); } catch { } }
         static void LoadConfig() { if (!File.Exists(_path)) return; try { var options = new JsonSerializerOptions { IncludeFields = true }; var loaded = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(_path), options); if (loaded != null) Config = loaded; } catch { } }
     }
 }
