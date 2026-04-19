@@ -1,80 +1,163 @@
-﻿# VRChat Unfriend Manager (VRC:UFM)
+﻿# VRChat MusicChatBox (Linux)
 
-> Copyright © 2025 [hollynt]
-> This work is free. You can redistribute it and/or modify it under the
-> terms of the Do What The Fuck You Want To Public License, Version 2,
-> as published by Sam Hocevar. See the [LICENSE](#-license) section for more details.
+A feature-rich OSC Chatbox manager for VRChat on Linux (Fedora/Steam Deck/Ubuntu). Features a vertical stacked UI, animated typewriter/scroll statuses, PC hardware monitoring, and music integration.
 
-**VRC:UFM** is a powerful, terminal-based utility designed for managing your VRChat friends list with speed and precision. It allows you to bulk unfriend inactive users, re-add friends from backups, and organize your list without the limitations of the standard in-game or website UI.
+![Preview](https://gitlab.com/hollyntii/vrclinuxchatbox/-/raw/main/Screenshot_20260415_182633.png)
+![Preview](https://gitlab.com/hollyntii/vrclinuxchatbox/-/raw/main/Screenshot_20260415_185452.png)
 
-![S1](https://gitlab.com/hollyntii/VRChat-Unfriend-Manager/-/raw/master/Product%20Images/VRCUFMProduct.png?ref_type=heads)
-
-## 🚀 Features
-
-*   **Smart Inactivity Filtering:** Filter your friends list by last login time. Easily find users who haven't logged in for a specific number of Days, Months, or Years.
-*   **Advanced Sorting:** Sort your list by **Last Seen (Oldest First)**, **Last Seen (Newest First)**, or Alphabetically (A-Z / Z-A).
-*   **Favorites Protection:** The "Exclude Favorites" option ensures you don't accidentally remove close friends or people in your favorite groups.
-*   **Bulk Unfriend & Re-Add:**
-    *   **Unfriend:** Select multiple users and remove them in one go.
-    *   **Re-Add:** Mistake? Restore friends by loading a previously saved JSON backup; the tool will automatically send friend requests to everyone in the file.
-*   **Configuration Saving:** The app remembers your Username, Password (securely encoded), and your preferred settings (Sort Order, Inactive Filters, etc.) so you don't have to set them up every time.
-*   **Safety First:**
-    *   **2FA Support:** Full support for Authenticator Apps (TOTP), Email OTP, and Backup codes.
-    *   **Rate-Limit Protection:** Operations include randomized delays (5-10 seconds) to keep your account safe from API spam detection.
-    *   **Pause/Resume:** Need to stop? Pause the operation at any time and resume when ready.
-*   **JSON Backups:** One-click backup of your currently displayed list to a timestamped `.json` file.
-
-## 📋 Requirements
-
-*   **[.NET 6.0 Runtime (or newer)](https://dotnet.microsoft.com/en-us/download/dotnet/9.0)**
-*   Windows 10/11 (Recommended for Toast Notifications)
-
-## 🛠️ How to Use
-
-### 1. Login & Setup
-1.  Launch the application.
-2.  Enter your VRChat credentials.
-3.  Check **"Remember me"** to save your login and your UI settings (Sort order, filters, etc.) for next time.
-4.  If you have 2FA enabled, enter your code when prompted.
-
-### 2. Filtering & Sorting
-*   **Exclude Favorites:** Checked by default. Uncheck this if you really want to see/remove favorited friends.
-*   **Only show inactive ≥:** Check this to filter users based on how long they have been offline.
-    *   *Example:* Set to `1` and `Years` to see only people who haven't logged in for over a year.
-*   **Sort by:** Use the dropdown to organize the list. "Last Seen: Oldest" is the default, placing users who have **never** logged in at the very top.
-
-### 3. Managing the List
-*   **Navigation:** Use `Arrow Keys` to move up/down.
-*   **Selection:** Press `Spacebar` to check/uncheck a specific user.
-*   **Bulk Select:** Use the `Mark All` or `Unmark All` buttons to select everyone currently visible in the list.
-
-### 4. Actions
-*   **Unfriend Marked:** Removes all selected users. You will be asked to confirm before the process starts.
-*   **Backup Displayed:** Saves the currently visible list to a JSON file (e.g., `VRChatFriends_2025-01-01.json`).
-*   **Re-add from JSON:** Select a backup file to automatically send friend requests to everyone in that list.
+## ✨ Features
+*   **Animated Statuses:** Choice of Typewriter (with blinking cursor), Scrolling Marquee, or Static.
+*   **Music Integration:** Automatically fetches "Artist - Song" from desktop players (`playerctl`) or Browsers (`SoundCloud`, `Spotify`, `YouTube`).
+*   **System Stats:** Real-time CPU usage, RAM, and Linux Distro display.
+*   **VRChat Integration:** Real-time FPS and Ping pulled directly from your Steam/Proton logs.
+*   **Interactive Menu:** Beautiful TUI powered by `gum` to toggle features and edit settings on the fly.
+*   **Persistent Config:** Settings are saved automatically to `~/.config/vrc-magicchatbox.conf`.
 
 ---
 
-## ⚠️ Disclaimer
+## 🛠️ Prerequisites
 
-> **USE AT YOUR OWN RISK.**
->
-> *   **Unofficial Tool:** VRC:UFM is a third-party tool and is not affiliated with VRChat Inc.
-> *   **Permanent Actions:** Unfriending is permanent. While the "Re-add" feature exists, it relies on the user accepting your new friend request. **Always create a Backup before running bulk operations.**
-> *   **TOS:** Automating actions on your account technically falls into a grey area of VRChat's Terms of Service. This tool uses human-like delays to minimize risk, but the developer is not responsible for any administrative actions taken against your account.
+Before running the script, ensure you have the following dependencies installed.
 
----
+### 1. System Packages (Fedora)
+```bash
+sudo dnf install gum playerctl xdotool lm_sensors curl
+```
+*(For Ubuntu/Debian: `sudo apt install gum playerctl xdotool lm-sensors curl`)*
 
-## 🏗️ Building from Source
-
-1.  Clone this repository.
-2.  Ensure you have the .NET 6.0 SDK installed.
-3.  Navigate to the project folder in your terminal.
-4.  Run:
-    ```bash
-    dotnet run
-    ```
+### 2. Python Dependencies
+The script uses a tiny Python snippet to handle OSC networking:
+```bash
+pip install python-osc --user
+```
 
 ---
 
-[![License: WTFPL](https://img.shields.io/badge/License-WTFPL-brightgreen.svg)](http://www.wtfpl.net/)
+### 🏔️ Arch Linux / Steam Deck Installation
+
+Arch users are "built different," so the dependency names are slightly different.
+
+#### 1. Install System Dependencies
+```bash
+sudo pacman -S gum playerctl xdotool lm_sensors curl
+```
+
+#### 2. Install Python OSC
+On Arch, it is highly recommended to install Python packages via the AUR to avoid breaking your system environment:
+```bash
+# If you use yay:
+yay -S python-python-osc
+
+# Alternatively, if you prefer pip (use --break-system-packages if on a modern Arch build):
+pip install python-osc --user --break-system-packages
+```
+
+#### 3. Initial Hardware Setup
+Arch doesn't always auto-configure sensors. Run this once so the script can read your temperatures:
+```bash
+sudo sensors-detect  # Answer YES to all prompts
+```
+
+---
+
+### 🎮 Steam Deck (SteamOS) Specifics
+If you are running this on a **Steam Deck** (in Desktop Mode), Steam is often installed as a **Flatpak**. This changes the path where your VRChat logs are stored.
+
+Open `musicchat.sh` and change the `VRCLOG` line at the top to this:
+
+```bash
+# FLATPAK PATH (Uncomment this if on Steam Deck/Flatpak)
+# VRCLOG="$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/compatdata/438100/pfx/drive_c/users/steamuser/AppData/LocalLow/VRChat/VRChat/output_log.txt"
+```
+
+---
+
+### 🛠️ Troubleshooting for Arch
+*   **"command not found: gum"**: Ensure `/usr/bin` is in your `$PATH` (it usually is).
+*   **"No music"**: If you use a niche window manager (like Hyprland or Sway), `xdotool` might struggle with browser titles. In that case, the script will rely on `playerctl` for native apps like Spotify/Cider.
+*   **Permissions**: Ensure the script is executable: `chmod +x ~/Applications/musicchat.sh`.
+
+---
+
+### Final Master Code Update
+I've added a **Flatpak path check** to the top of the script so it works for Steam Deck users out of the box.
+
+```bash
+#!/bin/bash
+# =================================================================
+# VRChat MusicChatBox - GitLab Repository Master
+# =================================================================
+
+OSC_HOST="127.0.0.1"
+OSC_PORT=9000
+CONFIG_FILE="$HOME/.config/vrc-magicchatbox.conf"
+
+# PATH AUTO-DETECTION (Steam vs Flatpak)
+STEAM_PATH="$HOME/.local/share/Steam"
+FLATPAK_PATH="$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam"
+
+if [ -d "$FLATPAK_PATH" ]; then
+    VRC_BASE="$FLATPAK_PATH"
+else
+    VRC_BASE="$STEAM_PATH"
+fi
+
+VRCLOG="$VRC_BASE/steamapps/compatdata/438100/pfx/drive_c/users/steamuser/AppData/LocalLow/VRChat/VRChat/output_log.txt"
+
+---
+
+## 🚀 Installation
+
+### 1. Clone the Repository
+```bash
+cd ~/Applications
+git clone https://gitlab.com/hollyntii/vrclinuxchatbox.git
+cd vrclinuxchatbox
+```
+
+### 2. Make it Executable
+```bash
+chmod +x musicchat.sh
+```
+
+### 3. (Optional) Create a Global Shortcut
+To run the chatbox by just typing `musicchat` from any terminal:
+```bash
+sudo ln -sf ~/Applications/vrclinuxchatbox/musicchat.sh /usr/local/bin/musicchat
+```
+
+---
+
+## 🎮 Usage
+
+Simply run the script:
+```bash
+./musicchat.sh
+# OR, if you created the shortcut:
+musicchat
+```
+
+### ⚠️ Important Note on VRChat Logs
+The script is configured to look for your Steam/Proton logs at:
+`~/.local/share/Steam/steamapps/compatdata/438100/pfx/drive_c/users/steamuser/AppData/LocalLow/VRChat/VRChat/`
+
+If your Steam library is installed in a custom location, open `musicchat.sh` and update the `VRCLOG` variable at the top of the file.
+
+### Enable OSC in VRChat
+1. Open VRChat.
+2. Open your **Action Menu** (Radial Menu).
+3. Go to **Options** > **OSC**.
+4. Set **Enabled** to **ON**.
+
+---
+
+## ⚙️ Configuration
+The first time you run the script, it will create a configuration file at `~/.config/vrc-magicchatbox.conf`. You can edit this file manually or use the "Edit Settings" menu in-app to change:
+*   Update Interval
+*   Pronouns & Status Icons
+*   Weather City
+*   Feature Toggles
+
+## 🤝 Contributing
+Feel free to fork this project and submit Merge Requests on GitLab!
+
