@@ -3,7 +3,7 @@
 set -e
 
 OUT="./publish"
-PROJ="Unfriendmaxxing.csproj"
+PROJ="XOSC.csproj"
 
 echo "=== Building Linux x64 ==="
 dotnet publish "$PROJ" \
@@ -35,7 +35,7 @@ dotnet publish "$PROJ" \
 
 echo ""
 echo "=== Done ==="
-echo "  Linux:   $OUT/linux-x64/Unfriendmaxxing"
-echo "  Windows: $OUT/win-x64/Unfriendmaxxing.exe"
+echo "  Linux:   $OUT/linux-x64/XOSC"
+echo "  Windows: $OUT/win-x64/XOSC.exe"
 
 exit
