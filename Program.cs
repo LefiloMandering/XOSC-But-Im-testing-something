@@ -278,7 +278,7 @@ namespace XOSC
 
     class Program
     {
-        public const string AppVersion = "0f77cd8"; // THIS IS AUTOMATICALLY REPLACED BY publish.sh
+        public const string AppVersion = "e311e2d"; // THIS IS AUTOMATICALLY REPLACED BY publish.sh
         public static AppConfig Config = new();
         private static string _path = "/home/soap/xosc/config.json", _chatIn = "";
         private static Mutex? _mtx; private static int _navPage = 0;
