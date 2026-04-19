@@ -55,16 +55,15 @@ namespace XOSC
         public string TempUnit = "°C";
         public List<string> StatusList = new() { };
         public bool AutoCycleStatus = false;
-        public string PublishPath = "https://github.com/hollyntt/XOSC/raw/refs/heads/master/publish/XOSC.zip";
-        public bool BetaOptIn = false;
+        public string PublishPath = "";
         public string Cookie = "";
+        public string SavedVersion = "";
     }
 
     public static class HardwareService
     {
         private static long _lastTotal, _lastIdle;
         private static bool IsLinux = RuntimeInformation.IsOSPlatform(OSPlatform.Linux);
-
         public static string GetCpuLoad()
         {
             try {
@@ -76,7 +75,6 @@ namespace XOSC
                 return dTotal == 0 ? "0%" : Math.Round(100.0 * (1.0 - (double)dIdle / dTotal), 0) + "%";
             } catch { return "--"; }
         }
-
         public static string GetCpuTemp(string unit)
         {
             if (!IsLinux) return "--";
@@ -95,7 +93,6 @@ namespace XOSC
                 return unit == "°C" ? $"{c}°C" : $"{(c * 9 / 5) + 32}°F";
             } catch { return "--"; }
         }
-
         public static (string Load, string Vram, string Temp) GetGpuStats(string gUnit, string vUnit, string tUnit)
         {
             string smi = IsLinux ? "/usr/bin/nvidia-smi" : "C:\\Windows\\System32\\nvidia-smi.exe";
@@ -122,16 +119,12 @@ namespace XOSC
                 string vr = vUnit == "GB" ? $"{Math.Round(used / 1073741824.0, 1)}/{Math.Round(total / 1073741824.0, 1)}GB" : $"{Math.Round(100.0 * used / total, 0)}%";
                 string tmp = "--", hw = $"{gpu}/device/hwmon/";
                 if (Directory.Exists(hw)) {
-                    var dir = Directory.GetDirectories(hw).FirstOrDefault();
-                    if (dir != null && File.Exists($"{dir}/temp1_input")) {
-                        int c = int.Parse(File.ReadAllText($"{dir}/temp1_input").Trim()) / 1000;
-                        tmp = tUnit == "°C" ? $"{c}°C" : $"{(c * 9 / 5) + 32}°F";
-                    }
+                    var d = Directory.GetDirectories(hw).FirstOrDefault();
+                    if (d != null && File.Exists($"{d}/temp1_input")) { int c = int.Parse(File.ReadAllText($"{d}/temp1_input").Trim()) / 1000; tmp = tUnit == "°C" ? $"{c}°C" : $"{(c * 9 / 5) + 32}°F"; }
                 }
                 return (l, vr, tmp);
             } catch { return ("--", "--", "--"); }
         }
-
         public static string GetRamUsage(string unit)
         {
             if (!IsLinux) return "??GB";
@@ -148,36 +141,56 @@ namespace XOSC
     {
         public static string Status = "idle";
         public static bool NewVersionFound = false;
-        private static byte[]? _pData;
+        private static byte[]? _pendingData;
         private const string StableApiUrl = "https://api.github.com/repos/hollyntt/XOSC/releases/latest";
+
         public static async Task CheckForUpdates()
         {
             Status = "checking GitHub..."; NewVersionFound = false;
             try {
-                using var http = new HttpClient(); http.DefaultRequestHeaders.Add("User-Agent", "XOSC-Updater");
-                string dUrl = Program.Config.PublishPath;
-                if (!Program.Config.BetaOptIn) {
-                    var r = await http.GetStringAsync(StableApiUrl); using var doc = JsonDocument.Parse(r);
-                    string tag = doc.RootElement.GetProperty("tag_name").GetString() ?? "";
-                    if (tag == Program.AppVersion) { Status = "already up to date"; return; }
-                    dUrl = doc.RootElement.GetProperty("assets")[0].GetProperty("browser_download_url").GetString() ?? dUrl;
+                using var http = new HttpClient();
+                http.DefaultRequestHeaders.Add("User-Agent", "XOSC-Updater");
+                
+                var resp = await http.GetStringAsync(StableApiUrl);
+                using var doc = JsonDocument.Parse(resp);
+                string latestTag = doc.RootElement.GetProperty("tag_name").GetString() ?? "";
+
+                if (latestTag == Program.AppVersion) {
+                    Status = "already up to date";
+                    return;
                 }
-                var z = await http.GetByteArrayAsync(dUrl); using var ms = new MemoryStream(z); using var arch = new ZipArchive(ms);
-                var entry = arch.GetEntry("linux-x64/XOSC") ?? arch.GetEntry("XOSC");
-                if (entry == null) { Status = "binary not found in zip"; return; }
-                if (Program.Config.BetaOptIn && entry.Length == new FileInfo(Environment.ProcessPath!).Length) { Status = "already up to date"; return; }
-                Status = "update found!"; NewVersionFound = true;
-                using var es = entry.Open(); using var msw = new MemoryStream(); await es.CopyToAsync(msw); _pData = msw.ToArray();
+
+                var asset = doc.RootElement.GetProperty("assets").EnumerateArray()
+                    .FirstOrDefault(a => a.GetProperty("name").GetString() == "XOSC.zip");
+
+                string downloadUrl = asset.GetProperty("browser_download_url").GetString() ?? "";
+                if (string.IsNullOrEmpty(downloadUrl)) { Status = "XOSC.zip not found in release"; return; }
+
+                Status = "downloading...";
+                var zipData = await http.GetByteArrayAsync(downloadUrl);
+                using var ms = new MemoryStream(zipData);
+                using var archive = new ZipArchive(ms);
+                var entry = archive.GetEntry("linux-x64/XOSC") ?? archive.GetEntry("XOSC");
+                
+                if (entry != null) {
+                    using var es = entry.Open(); using var msw = new MemoryStream();
+                    await es.CopyToAsync(msw); _pendingData = msw.ToArray();
+                    Status = $"Update Found: {latestTag}"; NewVersionFound = true;
+                }
             } catch (Exception e) { Status = $"error: {e.Message}"; }
         }
+
         public static void ApplyUpdate()
         {
-            if (_pData == null) return;
+            if (_pendingData == null) return;
             try {
-                string self = Environment.ProcessPath!; Program.SaveConfig();
-                File.Move(self, self + ".bak", true); File.WriteAllBytes(self, _pData);
+                string self = Environment.ProcessPath!;
+                File.Move(self, self + ".bak", true);
+                File.WriteAllBytes(self, _pendingData);
                 if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux)) Process.Start("chmod", $"+x \"{self}\"").WaitForExit();
-                Thread.Sleep(500); Process.Start(new ProcessStartInfo(self) { UseShellExecute = true }); Environment.Exit(0);
+                Thread.Sleep(500);
+                Process.Start(new ProcessStartInfo(self) { UseShellExecute = true });
+                Environment.Exit(0);
             } catch { }
         }
     }
@@ -213,16 +226,14 @@ namespace XOSC
             if (cfg.PronounsMode && !string.IsNullOrEmpty(cfg.Pronouns)) lines.Add($"{cfg.StatusIcon} {cfg.Pronouns}");
             var env = new List<string>();
             if (cfg.TimeMode) env.Add($"🕒 {DateTime.Now:hh:mm tt}");
-            if (cfg.DistroMode) env.Add($"| 🐧 Fedora");
+            if (cfg.DistroMode) env.Add("| " + (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Windows" : "Fedora"));
             if (cfg.WeatherMode) env.Add($"| 🌤️ {_weather}");
             if (env.Count > 0) lines.Add(string.Join(" ", env));
             if (cfg.PcMode) {
                 var g = HardwareService.GetGpuStats(cfg.GpuUnit, cfg.VramUnit, cfg.TempUnit);
-                string cStat = cfg.CpuUnit == "Watt" ? "--W" : HardwareService.GetCpuLoad();
-                if (cfg.CpuTempOn) cStat += $" ({HardwareService.GetCpuTemp(cfg.TempUnit)})";
                 string cpuL = cfg.CustomCpuNameOn ? cfg.CustomCpuName : (cfg.HwNameMode ? Stylize(_cpu) : "CPU");
                 string gpuL = cfg.CustomGpuNameOn ? cfg.CustomGpuName : (cfg.HwNameMode ? Stylize(_gpu) : "GPU");
-                lines.Add($"🖥️ {cpuL}: {cStat} | 🎮 {gpuL}: {g.Load} ({g.Temp})");
+                lines.Add($"🖥️ {cpuL}: {HardwareService.GetCpuLoad()}" + (cfg.CpuTempOn ? $" ({HardwareService.GetCpuTemp(cfg.TempUnit)})" : "") + $" | 🎮 {gpuL}: {g.Load} ({g.Temp})");
                 var mem = new List<string>();
                 if (cfg.ShowRam) mem.Add($"🐏 ʳᵃᵐ: {HardwareService.GetRamUsage(cfg.RamUnit)}");
                 if (cfg.ShowVram) mem.Add($"🎞️ ᵛʳᵃᵐ: {g.Vram}");
@@ -232,13 +243,15 @@ namespace XOSC
             if (cfg.SongMode && _music != "Chilling") lines.Add($"♪ {_music}");
             string output = string.Join("\n", lines);
             if (cfg.ThinMode) { if (output.Length > 138) output = output.Substring(0, 138); output += "\u0003\u001f"; }
-            SendOsc("/chatbox/input", output); _lastSent = DateTime.Now; PacketsSent++; EngineState = "Idle";
+            SendOsc("/chatbox/input", output); _lastSent = DateTime.Now; PacketsSent++;
         }
+
         private static void SendOsc(string addr, string text) {
             try { List<byte> p = new(); void Add(string s) { byte[] b = Encoding.UTF8.GetBytes(s); p.AddRange(b); p.Add(0); while (p.Count % 4 != 0) p.Add(0); }
                 Add(addr); Add(",sTT"); Add(text); _client.Send(p.ToArray(), p.Count, "127.0.0.1", 9000);
             } catch { }
         }
+
         private static string FetchMusic() {
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) {
                 StringBuilder buff = new StringBuilder(256); IntPtr handle = GetForegroundWindow();
@@ -251,10 +264,10 @@ namespace XOSC
             try {
                 var psi = new ProcessStartInfo("playerctl", "metadata --format \"{{artist}} - {{title}}\"") { RedirectStandardOutput = true, UseShellExecute = false };
                 using var p = Process.Start(psi); string r = p?.StandardOutput.ReadToEnd().Trim() ?? "";
-                if (!string.IsNullOrEmpty(r) && r != " - ") return r;
-                return "Chilling";
+                return (string.IsNullOrEmpty(r) || r == " - ") ? "Chilling" : r;
             } catch { return "Chilling"; }
         }
+
         private static void ScrapeHardwareNames() {
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return;
             string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -278,26 +291,25 @@ namespace XOSC
 
     class Program
     {
-        public const string AppVersion = "e311e2d"; // THIS IS AUTOMATICALLY REPLACED BY publish.sh
+        public const string AppVersion = "2860d0a";
         public static AppConfig Config = new();
         private static string _path = "/home/soap/xosc/config.json", _chatIn = "";
         private static Mutex? _mtx; private static int _navPage = 0;
         private static readonly string[] _navLabels = { "Dashboard", "Statuses", "Chatbox", "Hardware", "Network", "Updater" };
         private static readonly Vector4 ColAccent = new(0.38f, 0.73f, 1.00f, 1f), ColBg = new(0.10f, 0.10f, 0.13f, 1f), ColSidebar = new(0.07f, 0.07f, 0.09f, 1f), ColCard = new(0.14f, 0.14f, 0.18f, 1f);
 
-        public static void Main()
-        {
-            _mtx = new Mutex(true, "XOSC_VRC_Unique_Runner", out bool fresh); if (!fresh) Environment.Exit(0);
-            Directory.CreateDirectory("/home/soap/xosc"); LoadConfig(); MusicChatEngine.Init();
-            Raylib.InitWindow(960, 640, "XOSC"); Raylib.SetWindowState(ConfigFlags.ResizableWindow); rlImGui.Setup(true); Raylib.SetTargetFPS(60); ApplyTheme();
+        public static void Main() {
+            _mtx = new Mutex(true, "XOSC_VRC_Unique_REL", out bool fresh); if (!fresh) Environment.Exit(0);
+            Directory.CreateDirectory("/home/soap/xosc"); LoadConfig();
+            if (Config.SavedVersion != AppVersion) { Config.SavedVersion = AppVersion; SaveConfig(); }
+            MusicChatEngine.Init(); Raylib.InitWindow(960, 640, "XOSC"); Raylib.SetWindowState(ConfigFlags.ResizableWindow); rlImGui.Setup(true); Raylib.SetTargetFPS(60); ApplyTheme();
             while (!Raylib.WindowShouldClose()) { Raylib.BeginDrawing(); Raylib.ClearBackground(new Color(26, 26, 33, 255)); rlImGui.Begin(); DrawUI(); rlImGui.End(); Raylib.EndDrawing(); }
             SaveConfig(); Raylib.CloseWindow();
         }
         static void ApplyTheme() {
             var s = ImGui.GetStyle(); s.WindowRounding = 0; s.ChildRounding = 6; s.FrameRounding = 5; s.PopupRounding = 5; s.ScrollbarRounding = 5; s.GrabRounding = 4; s.TabRounding = 5; s.WindowPadding = new Vector2(12, 12);
         }
-        static void DrawUI()
-        {
+        static void DrawUI() {
             int sw = Raylib.GetScreenWidth(), sh = Raylib.GetScreenHeight();
             ImGui.SetNextWindowPos(Vector2.Zero); ImGui.SetNextWindowSize(new Vector2(sw, sh));
             ImGui.Begin("##root", ImGuiWindowFlags.NoDecoration | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoScrollbar);
@@ -309,14 +321,12 @@ namespace XOSC
                 bool active = _navPage == i; ImGui.PushStyleColor(ImGuiCol.Button, active ? new Vector4(0.38f, 0.73f, 1.00f, 0.13f) : Vector4.Zero); ImGui.PushStyleColor(ImGuiCol.Text, active ? ColAccent : new Vector4(0.72f, 0.72f, 0.80f, 1f));
                 ImGui.SetCursorPosX(10); if (ImGui.Button(_navLabels[i], new Vector2(152, 36))) _navPage = i; ImGui.PopStyleColor(2);
             }
-            ImGui.SetCursorPosY(sh - 50); ImGui.SetCursorPosX(20);
-            ImGui.TextColored(Config.ChatboxEnabled ? new Vector4(0.35f, 0.95f, 0.55f, 1f) : new Vector4(1f, 0.33f, 0.33f, 1f), Config.ChatboxEnabled ? "● Live" : "● Paused");
             ImGui.EndChild(); ImGui.PopStyleColor(); ImGui.SameLine();
             ImGui.PushStyleColor(ImGuiCol.ChildBg, ColBg);
             ImGui.BeginChild("##content", new Vector2(sw - 172, sh), ImGuiChildFlags.None, ImGuiWindowFlags.NoScrollbar); ImGui.Dummy(new Vector2(0, 24));
             switch (_navPage) {
                 case 0: Card("Dashboard", () => {
-                    ImGui.Text($"Engine: {MusicChatEngine.EngineState} | Packets: {MusicChatEngine.PacketsSent}");
+                    ImGui.Text($"Engine State: {MusicChatEngine.PacketsSent}");
                     ImGui.InputText("Override##field", ref _chatIn, 128); if (ImGui.Button("Send")) { MusicChatEngine.SetManual(_chatIn); _chatIn = ""; }
                 }); break;
                 case 1: Card("Statuses", () => {
@@ -349,7 +359,6 @@ namespace XOSC
                 }); break;
                 case 4: Card("Network", () => { Toggle("Internet Ping", ref Config.NetMode); }); break;
                 case 5: Card("Updater", () => {
-                    ImGui.Checkbox("Beta Opt-in", ref Config.BetaOptIn);
                     if (ImGui.Button("Check for Update")) Task.Run(() => Updater.CheckForUpdates());
                     if (Updater.NewVersionFound && ImGui.Button("Apply Update")) Updater.ApplyUpdate();
                     ImGui.Text($"Status: {Updater.Status}");
@@ -364,7 +373,7 @@ namespace XOSC
             ImGui.Dummy(new Vector2(0, 10)); d(); ImGui.Dummy(new Vector2(0, 10)); ImGui.EndChild(); ImGui.PopStyleColor();
         }
         static void Toggle(string l, ref bool v) { if (ImGui.Checkbox(l, ref v)) SaveConfig(); }
-        public static void SaveConfig() { try { var options = new JsonSerializerOptions { WriteIndented = true, IncludeFields = true }; File.WriteAllText(_path, JsonSerializer.Serialize(Config, options)); } catch { } }
+        public static void SaveConfig() { try { Directory.CreateDirectory(Path.GetDirectoryName(_path)); var options = new JsonSerializerOptions { WriteIndented = true, IncludeFields = true }; File.WriteAllText(_path, JsonSerializer.Serialize(Config, options)); } catch { } }
         static void LoadConfig() { if (!File.Exists(_path)) return; try { var options = new JsonSerializerOptions { IncludeFields = true }; var loaded = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(_path), options); if (loaded != null) Config = loaded; } catch { } }
     }
 }
