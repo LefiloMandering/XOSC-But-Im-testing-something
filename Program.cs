@@ -24,7 +24,7 @@ namespace XOSC
 {
     public class AppConfig
     {
-        public string Version = "v2.1.0-92f027e";
+        public string Version = "v2.1.0-b488eb1";
         public bool ChatboxEnabled = true;
         public int Interval = 1;
         public string City = "";
