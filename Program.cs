@@ -291,7 +291,7 @@ namespace XOSC
 
     class Program
     {
-        public const string AppVersion = "2860d0a";
+        public const string AppVersion = "00bdf19";
         public static AppConfig Config = new();
         private static string _path = "/home/soap/xosc/config.json", _chatIn = "";
         private static Mutex? _mtx; private static int _navPage = 0;
