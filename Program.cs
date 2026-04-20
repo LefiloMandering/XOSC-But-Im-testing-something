@@ -20,6 +20,8 @@ using Raylib_cs;
 using ImGuiNET;
 using rlImGui_cs;
 
+// Lets see how awesome and skidded this program is!!!!!!!!!!1
+
 namespace XOSC
 {
     public class AppConfig
@@ -58,7 +60,7 @@ namespace XOSC
         public string PublishPath = "";
         public string Cookie = "";
         public string SavedVersion = "";
-    }
+    } // normal
 
     public static class HardwareService
     {
@@ -95,7 +97,7 @@ namespace XOSC
         }
         public static (string Load, string Vram, string Temp) GetGpuStats(string gUnit, string vUnit, string tUnit)
         {
-            string smi = IsLinux ? "/usr/bin/nvidia-smi" : "C:\\Windows\\System32\\nvidia-smi.exe";
+            string smi = IsLinux ? "/usr/bin/nvidia-smi" : "C:\\Windows\\System32\\nvidia-smi.exe"; // good app for dogshit gpu company
             if (File.Exists(smi)) {
                 try {
                     var psi = new ProcessStartInfo(smi, "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits") { RedirectStandardOutput = true, UseShellExecute = false };
@@ -139,10 +141,10 @@ namespace XOSC
 
     public static class Updater
     {
-        public static string Status = "idle";
+        public static string Status = "idle"; // zZzZ
         public static bool NewVersionFound = false;
         private static byte[]? _pendingData;
-        private const string StableApiUrl = "https://api.github.com/repos/hollyntt/XOSC/releases/latest";
+        private const string StableApiUrl = "https://api.github.com/repos/hollyntt/XOSC/releases/latest"; // hi no im not a token logger, im on github so chill out yo
 
         public static async Task CheckForUpdates()
         {
@@ -174,7 +176,7 @@ namespace XOSC
                 
                 if (entry != null) {
                     using var es = entry.Open(); using var msw = new MemoryStream();
-                    await es.CopyToAsync(msw); _pendingData = msw.ToArray();
+                    await es.CopyToAsync(msw); _pendingData = msw.ToArray(); // why the line yellow yo, is that a piss stream??
                     Status = $"Update Found: {latestTag}"; NewVersionFound = true;
                 }
             } catch (Exception e) { Status = $"error: {e.Message}"; }
@@ -188,14 +190,14 @@ namespace XOSC
                 File.Move(self, self + ".bak", true);
                 File.WriteAllBytes(self, _pendingData);
                 if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux)) Process.Start("chmod", $"+x \"{self}\"").WaitForExit();
-                Thread.Sleep(500);
+                Thread.Sleep(500); // yo, ig this is the method
                 Process.Start(new ProcessStartInfo(self) { UseShellExecute = true });
                 Environment.Exit(0);
             } catch { }
         }
     }
 
-    public static class MusicChatEngine
+    public static class MusicChatEngine // wat
     {
         private static UdpClient _client = new();
         private static CancellationTokenSource? _cts;
@@ -204,7 +206,7 @@ namespace XOSC
         private static DateTime _lastRefresh = DateTime.MinValue, _manualExpiry = DateTime.MinValue, _lastSent = DateTime.MinValue;
         private static string _manualMsg = "";
         public static int PacketsSent = 0;
-        public static string EngineState = "Idle";
+        public static string EngineState = "Idle"; // ZzZz
         public static readonly object ListLock = new();
 
         public static void Init() { _client = new UdpClient(); _cts?.Cancel(); _cts = new CancellationTokenSource(); ScrapeHardwareNames(); Task.Run(() => Loop(_cts.Token)); }
@@ -244,7 +246,7 @@ namespace XOSC
             string output = string.Join("\n", lines);
             if (cfg.ThinMode) { if (output.Length > 138) output = output.Substring(0, 138); output += "\u0003\u001f"; }
             SendOsc("/chatbox/input", output); _lastSent = DateTime.Now; PacketsSent++;
-        }
+        } // Always code as if the guy who ends up maintaining you code will be a hypersexual rapist furry who knows what your private e621 account is
 
         private static void SendOsc(string addr, string text) {
             try { List<byte> p = new(); void Add(string s) { byte[] b = Encoding.UTF8.GetBytes(s); p.AddRange(b); p.Add(0); while (p.Count % 4 != 0) p.Add(0); }
@@ -271,7 +273,7 @@ namespace XOSC
         private static void ScrapeHardwareNames() {
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return;
             string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            string p = Path.Combine(home, ".local/share/Steam/steamapps/compatdata/438100/pfx/drive_c/users/steamuser/AppData/LocalLow/VRChat/VRChat");
+            string p = Path.Combine(home, ".local/share/Steam/steamapps/compatdata/438100/pfx/drive_c/users/steamuser/AppData/LocalLow/VRChat/VRChat"); // yes yes hardcoding yes yes
             if (Directory.Exists(p)) {
                 var log = Directory.GetFiles(p, "output_log_*.txt").OrderByDescending(File.GetLastWriteTime).FirstOrDefault();
                 if (log != null) foreach (var l in File.ReadLines(log).Take(1500)) {
@@ -285,13 +287,13 @@ namespace XOSC
             StringBuilder sb = new(); foreach (char c in t) { int i = n.IndexOf(c); sb.Append(i != -1 ? s[i] : c); }
             return sb.ToString();
         }
-        [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow(); // literally magicchatbox has this in their code too i don't mind a little bits of CTRL+C+V
         [DllImport("user32.dll")] private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
     }
 
     class Program
     {
-        public const string AppVersion = "00bdf19";
+        public const string AppVersion = "f61994b"; // oh cool this is automated by publish nice
         public static AppConfig Config = new();
         private static string _path = "/home/soap/xosc/config.json", _chatIn = "";
         private static Mutex? _mtx; private static int _navPage = 0;
@@ -316,7 +318,7 @@ namespace XOSC
             ImGui.PushStyleColor(ImGuiCol.ChildBg, ColSidebar);
             ImGui.BeginChild("##sidebar", new Vector2(172, sh), ImGuiChildFlags.None, ImGuiWindowFlags.NoScrollbar);
             ImGui.Dummy(new Vector2(0, 20)); ImGui.SetCursorPosX(20); ImGui.TextColored(ColAccent, "XOSC");
-            ImGui.SetCursorPosX(20); ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.6f, 1f), $"v{AppVersion}"); ImGui.Dummy(new Vector2(0, 20));
+            ImGui.SetCursorPosX(20); ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.6f, 1f), $"Commit: {AppVersion}"); ImGui.Dummy(new Vector2(0, 20)); // Changed it a little bit here to clarificate better
             for (int i = 0; i < _navLabels.Length; i++) {
                 bool active = _navPage == i; ImGui.PushStyleColor(ImGuiCol.Button, active ? new Vector4(0.38f, 0.73f, 1.00f, 0.13f) : Vector4.Zero); ImGui.PushStyleColor(ImGuiCol.Text, active ? ColAccent : new Vector4(0.72f, 0.72f, 0.80f, 1f));
                 ImGui.SetCursorPosX(10); if (ImGui.Button(_navLabels[i], new Vector2(152, 36))) _navPage = i; ImGui.PopStyleColor(2);
@@ -375,5 +377,5 @@ namespace XOSC
         static void Toggle(string l, ref bool v) { if (ImGui.Checkbox(l, ref v)) SaveConfig(); }
         public static void SaveConfig() { try { Directory.CreateDirectory(Path.GetDirectoryName(_path)); var options = new JsonSerializerOptions { WriteIndented = true, IncludeFields = true }; File.WriteAllText(_path, JsonSerializer.Serialize(Config, options)); } catch { } }
         static void LoadConfig() { if (!File.Exists(_path)) return; try { var options = new JsonSerializerOptions { IncludeFields = true }; var loaded = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(_path), options); if (loaded != null) Config = loaded; } catch { } }
-    }
+    } // nevermind i def wrote all of this by hand, i must hate myself
 }
