@@ -213,7 +213,7 @@ namespace XOSC
         public static void SetManual(string m) { _manualMsg = m; _manualExpiry = DateTime.Now.AddSeconds(20); }
         private static async Task Loop(CancellationToken t) { while (!t.IsCancellationRequested) { if (Program.Config.ChatboxEnabled) try { await Update(); } catch { } await Task.Delay(1000, t); } }
         
-        private static async Task Update()
+        private static async Task Update() // Frequent uranium chewer
         {
             var cfg = Program.Config;
             if (DateTime.Now < _manualExpiry) { EngineState = "Manual"; SendOsc("/chatbox/input", $"💬 {_manualMsg}"); return; }
@@ -293,7 +293,7 @@ namespace XOSC
 
     class Program
     {
-        public const string AppVersion = "f61994b"; // oh cool this is automated by publish nice
+        public const string AppVersion = "e6e6bb4"; // oh cool this is automated by publish nice
         public static AppConfig Config = new();
         private static string _path = "/home/soap/xosc/config.json", _chatIn = "";
         private static Mutex? _mtx; private static int _navPage = 0;
@@ -302,7 +302,7 @@ namespace XOSC
 
         public static void Main() {
             _mtx = new Mutex(true, "XOSC_VRC_Unique_REL", out bool fresh); if (!fresh) Environment.Exit(0);
-            Directory.CreateDirectory("/home/soap/xosc"); LoadConfig();
+            Directory.CreateDirectory("/home/soap/xosc"); LoadConfig(); // The neighbor's weirdass dog got out again
             if (Config.SavedVersion != AppVersion) { Config.SavedVersion = AppVersion; SaveConfig(); }
             MusicChatEngine.Init(); Raylib.InitWindow(960, 640, "XOSC"); Raylib.SetWindowState(ConfigFlags.ResizableWindow); rlImGui.Setup(true); Raylib.SetTargetFPS(60); ApplyTheme();
             while (!Raylib.WindowShouldClose()) { Raylib.BeginDrawing(); Raylib.ClearBackground(new Color(26, 26, 33, 255)); rlImGui.Begin(); DrawUI(); rlImGui.End(); Raylib.EndDrawing(); }
@@ -347,13 +347,13 @@ namespace XOSC
                     Toggle("Status Text", ref Config.StatusTextMode); Toggle("Pronouns", ref Config.PronounsMode);
                     Toggle("Song Mode", ref Config.SongMode); Toggle("Time", ref Config.TimeMode);
                     Toggle("Distro", ref Config.DistroMode); Toggle("Weather", ref Config.WeatherMode);
-                    Toggle("Thin Mode", ref Config.ThinMode); Toggle("Auto-Cycle", ref Config.AutoCycleStatus);
+                    Toggle("Thin Mode", ref Config.ThinMode); Toggle("Auto-Cycle", ref Config.AutoCycleStatus); 
                     ImGui.InputText("Pronouns##field", ref Config.Pronouns, 64);
                     ImGui.InputText("Weather City##field", ref Config.City, 64);
                     ImGui.SliderInt("Interval##slider", ref Config.Interval, 1, 60);
                 }); break;
                 case 3: Card("Hardware", () => {
-                    Toggle("Show Stats", ref Config.PcMode); Toggle("Show RAM", ref Config.ShowRam);
+                    Toggle("Show Stats", ref Config.PcMode); Toggle("Show RAM", ref Config.ShowRam); // I like Bush (the pussy, not the president)
                     Toggle("Show VRAM", ref Config.ShowVram); Toggle("Stylized Names", ref Config.HwNameMode);
                     Toggle("CPU Temp", ref Config.CpuTempOn); Toggle("GPU Temp", ref Config.GpuTempOn);
                     Toggle("Custom CPU Name", ref Config.CustomCpuNameOn); if (Config.CustomCpuNameOn) ImGui.InputText("##c_cpu", ref Config.CustomCpuName, 32);
