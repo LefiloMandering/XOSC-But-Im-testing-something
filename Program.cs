@@ -22,6 +22,12 @@ using rlImGui_cs;
 
 namespace XOSC
 {
+    public class StatusItem
+    {
+        public string Text { get; set; } = "New Status";
+        public bool IsFavorited { get; set; } = false;
+    }
+
     public class AppConfig
     {
         public bool ChatboxEnabled = true;
@@ -59,7 +65,7 @@ namespace XOSC
         public string GpuUnit = "%";
         public string VramUnit = "GB";
         public string TempUnit = "°C";
-        public List<string> StatusList = new() { };
+        public List<StatusItem> StatusList { get; set; } = new();
         public bool AutoCycleStatus = false;
         public string PublishPath = "https://github.com/hollyntt/XOSC/raw/refs/heads/master/publish/XOSC.zip";
         public bool BetaOptIn = false;
@@ -109,7 +115,7 @@ namespace XOSC
 
         public static (string Load, string Vram, string Temp) GetGpuStats(string gUnit, string vUnit, string tUnit)
         {
-            string smi = ""; // heh
+            string smi = "";
             if (IsLinux) {
                 smi = "/usr/bin/nvidia-smi";
             } else {
@@ -214,16 +220,26 @@ namespace XOSC
         {
             var cfg = Program.Config;
             if (DateTime.Now < _manualE) { EngineState = "Manual"; SendOsc("/chatbox/input", $"💬 {_manualM}"); return; }
+
             if ((DateTime.Now - _lastR).TotalSeconds >= cfg.Interval) {
                 _music = FetchMusic();
                 string actualCity = cfg.City == "Custom..." ? cfg.CustomCity : cfg.City;
                 if (cfg.WeatherMode && !string.IsNullOrEmpty(actualCity)) _weather = (await new HttpClient().GetStringAsync($"https://wttr.in/{Uri.EscapeDataString(actualCity)}?format=%C+%t")).Trim();
-                lock (ListLock) { if (cfg.AutoCycleStatus && cfg.StatusList.Count > 0) _statusIdx = (_statusIdx + 1) % cfg.StatusList.Count; }
                 _lastR = DateTime.Now;
             }
+
             if ((DateTime.Now - _lastS).TotalSeconds < Math.Max(cfg.Interval, 1.5)) return;
+
             var lines = new List<string>();
-            lock (ListLock) { if (cfg.StatusTextMode && cfg.StatusList.Count > _statusIdx) { if (_statusIdx >= cfg.StatusList.Count) _statusIdx = 0; lines.Add(cfg.StatusList[_statusIdx]); } }
+            bool statusWasAdded = false;
+            lock (ListLock) {
+                if (cfg.StatusTextMode && cfg.StatusList.Count > 0) {
+                    if (_statusIdx >= cfg.StatusList.Count) _statusIdx = 0;
+                    lines.Add(cfg.StatusList[_statusIdx].Text);
+                    statusWasAdded = true;
+                }
+            }
+
             string actualPronouns = cfg.Pronouns == "Custom..." ? cfg.CustomPronouns : cfg.Pronouns;
             if (cfg.PronounsMode && !string.IsNullOrEmpty(actualPronouns)) lines.Add($"{cfg.StatusIcon} {actualPronouns}");
             var env = new List<string>();
@@ -245,9 +261,19 @@ namespace XOSC
             }
             if (cfg.NetMode) lines.Add($"🌐 {new System.Net.NetworkInformation.Ping().Send("1.1.1.1", 300).RoundtripTime}ms");
             if (cfg.SongMode && _music != "Chilling") lines.Add($"♪ {_music}");
+
             string output = string.Join("\n", lines);
             if (cfg.ThinMode) { if (output.Length > 138) output = output.Substring(0, 138); output += "\u0003\u001f"; }
-            SendOsc("/chatbox/input", output); _lastS = DateTime.Now; PacketsSent++; EngineState = "Idle";
+            SendOsc("/chatbox/input", output);
+            _lastS = DateTime.Now;
+            PacketsSent++;
+            EngineState = "Idle";
+
+            if (statusWasAdded && cfg.AutoCycleStatus) {
+                lock (ListLock) {
+                    _statusIdx = (_statusIdx + 1) % cfg.StatusList.Count;
+                }
+            }
         }
         private static void SendOsc(string addr, string text) {
             try { List<byte> p = new(); void Add(string s) { byte[] b = Encoding.UTF8.GetBytes(s); p.AddRange(b); p.Add(0); while (p.Count % 4 != 0) p.Add(0); }
@@ -286,7 +312,7 @@ namespace XOSC
 
     class Program
     {
-        public const string AppVersion = "0edb5f1";
+        public const string AppVersion = "dev";
         public static AppConfig Config = new();
         
         private static string _path = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) 
@@ -297,6 +323,7 @@ namespace XOSC
         private static Mutex? _mtx; private static int _navPage = 0;
         private static readonly string[] _navLabels = { "Dashboard", "Statuses", "Chatbox", "Hardware", "Network", "Updater" };
         private static readonly Vector4 ColAccent = new(0.38f, 0.73f, 1.00f, 1f), ColBg = new(0.10f, 0.10f, 0.13f, 1f), ColSidebar = new(0.07f, 0.07f, 0.09f, 1f), ColCard = new(0.14f, 0.14f, 0.18f, 1f);
+        private static HashSet<int> _selectedStatusIndices = new();
 
         private static readonly string[] _pronounsList = { "He/Him", "She/Her", "They/Them", "He/They", "She/They", "It/Its", "Any", "Custom..." };
         
@@ -471,7 +498,73 @@ namespace XOSC
                     if (ImGui.InputText("OSC IP", ref Config.OscIP, 64)) SaveConfig();
                     if (ImGui.InputInt("OSC Port", ref Config.OscPort)) SaveConfig();
                 }); break;
-                case 1: Card("Statuses", () => { int toRem = -1; lock (MusicChatEngine.ListLock) { for (int i = 0; i < Config.StatusList.Count; i++) { string s = Config.StatusList[i]; ImGui.PushID(i); if (ImGui.InputText("##s", ref s, 100)) Config.StatusList[i] = s; ImGui.SameLine(); if (ImGui.Button("X")) toRem = i; ImGui.PopID(); } if (toRem != -1) { Config.StatusList.RemoveAt(toRem); SaveConfig(); } } if (ImGui.Button("+ Add")) Config.StatusList.Add("New Status"); }); break;
+                case 1: Card("Statuses", () => {
+                    lock (MusicChatEngine.ListLock) {
+                        for (int i = 0; i < Config.StatusList.Count; i++) {
+                            ImGui.PushID(i);
+                            var item = Config.StatusList[i];
+                            bool isSelected = _selectedStatusIndices.Contains(i);
+                            if (ImGui.Checkbox("##select", ref isSelected)) {
+                                if (isSelected) _selectedStatusIndices.Add(i);
+                                else _selectedStatusIndices.Remove(i);
+                            }
+                            ImGui.SameLine();
+
+                            if (ImGui.Button(item.IsFavorited ? "*" : "-")) {
+                                item.IsFavorited = !item.IsFavorited;
+                                var sortedList = Config.StatusList.OrderByDescending(s => s.IsFavorited).ToList();
+                                Config.StatusList = sortedList;
+                                SaveConfig();
+                                ImGui.PopID();
+                                break; 
+                            }
+                            ImGui.SameLine();
+
+                            if (ImGui.Button("^") && i > 0) {
+                                var prevItem = Config.StatusList[i - 1];
+                                if (item.IsFavorited == prevItem.IsFavorited) {
+                                    Config.StatusList[i] = prevItem;
+                                    Config.StatusList[i - 1] = item;
+                                    SaveConfig();
+                                }
+                            }
+                            ImGui.SameLine();
+
+                            if (ImGui.Button("v") && i < Config.StatusList.Count - 1) {
+                                var nextItem = Config.StatusList[i + 1];
+                                if (item.IsFavorited == nextItem.IsFavorited) {
+                                    Config.StatusList[i] = nextItem;
+                                    Config.StatusList[i + 1] = item;
+                                    SaveConfig();
+                                }
+                            }
+                            ImGui.SameLine();
+
+                            string statusText = item.Text;
+                            if (ImGui.InputText("##s", ref statusText, 100))
+                            {
+                                item.Text = statusText;
+                                SaveConfig();
+                            }
+                            ImGui.PopID();
+                        }
+                    }
+
+                    ImGui.Dummy(new Vector2(0, 10));
+                    if (ImGui.Button("+ Add New Status")) Config.StatusList.Add(new StatusItem());
+                    ImGui.SameLine();
+                    if (_selectedStatusIndices.Any()) {
+                        if (ImGui.Button("Remove Selected")) {
+                            var sorted = _selectedStatusIndices.ToList();
+                            sorted.Sort();
+                            for (int i = sorted.Count - 1; i >= 0; i--) {
+                                Config.StatusList.RemoveAt(sorted[i]);
+                            }
+                            _selectedStatusIndices.Clear();
+                            SaveConfig();
+                        }
+                    }
+                }); break;
                 case 2: Card("Chatbox", () => { 
                     Toggle("Status Text", ref Config.StatusTextMode); 
                     Toggle("Pronouns##Toggle", ref Config.PronounsMode); 
@@ -523,6 +616,55 @@ namespace XOSC
         static void Card(string t, Action d) { ImGui.SetCursorPosX(24); ImGui.TextColored(new Vector4(0.92f, 0.92f, 0.97f, 1f), t); ImGui.Dummy(new Vector2(0, 8)); ImGui.SetCursorPosX(24); ImGui.PushStyleColor(ImGuiCol.ChildBg, ColCard); ImGui.BeginChild($"##c{t}", new Vector2(ImGui.GetContentRegionAvail().X - 48, 0), ImGuiChildFlags.Borders | ImGuiChildFlags.AutoResizeY); ImGui.Dummy(new Vector2(0, 10)); d(); ImGui.Dummy(new Vector2(0, 10)); ImGui.EndChild(); ImGui.PopStyleColor(); }
         static void Toggle(string l, ref bool v) { if (ImGui.Checkbox(l, ref v)) SaveConfig(); }
         public static void SaveConfig() { try { Directory.CreateDirectory(Path.GetDirectoryName(_path)); var options = new JsonSerializerOptions { WriteIndented = true, IncludeFields = true }; File.WriteAllText(_path, JsonSerializer.Serialize(Config, options)); } catch { } }
-        static void LoadConfig() { if (!File.Exists(_path)) return; try { var options = new JsonSerializerOptions { IncludeFields = true }; var loaded = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(_path), options); if (loaded != null) Config = loaded; } catch { } }
+        static void LoadConfig() {
+            if (!File.Exists(_path)) return;
+            try {
+                var rawJson = File.ReadAllText(_path);
+                var jsonNode = System.Text.Json.Nodes.JsonNode.Parse(rawJson);
+                if (jsonNode["StatusList"] is System.Text.Json.Nodes.JsonArray statusList && statusList.All(node => node is System.Text.Json.Nodes.JsonValue)) {
+                    var stringList = JsonSerializer.Deserialize<List<string>>(statusList.ToJsonString());
+                    var tempConfig = JsonSerializer.Deserialize<AppConfig>(rawJson);
+                    if (tempConfig != null && stringList != null) {
+                        tempConfig.StatusList = stringList.Select(s => new StatusItem { Text = s }).ToList();
+                        Config = tempConfig;
+                        SaveConfig(); 
+                        return;
+                    }
+                }
+
+                var options = new JsonSerializerOptions { IncludeFields = true, Converters = { new StatusItemConverter() } };
+                var loaded = JsonSerializer.Deserialize<AppConfig>(rawJson, options);
+                if (loaded != null) Config = loaded;
+            } catch { }
+        }
+    }
+    
+    public class StatusItemConverter : JsonConverter<List<StatusItem>>
+    {
+        public override List<StatusItem> Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            if (reader.TokenType == JsonTokenType.StartArray)
+            {
+                var list = new List<StatusItem>();
+                while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+                {
+                    if (reader.TokenType == JsonTokenType.String)
+                    {
+                        list.Add(new StatusItem { Text = reader.GetString() });
+                    }
+                    else if (reader.TokenType == JsonTokenType.StartObject)
+                    {
+                        list.Add(JsonSerializer.Deserialize<StatusItem>(ref reader, options));
+                    }
+                }
+                return list;
+            }
+            return new List<StatusItem>();
+        }
+
+        public override void Write(Utf8JsonWriter writer, List<StatusItem> value, JsonSerializerOptions options)
+        {
+            JsonSerializer.Serialize(writer, value, options);
+        }
     }
 }
