@@ -65,6 +65,8 @@ namespace XOSC
         public bool BetaOptIn = false;
         public string Cookie = "";
         public string SavedVersion = "";
+        public string OscIP = "127.0.0.1";
+        public int OscPort = 9000;
     }
 
     public static class HardwareService
@@ -249,7 +251,7 @@ namespace XOSC
         }
         private static void SendOsc(string addr, string text) {
             try { List<byte> p = new(); void Add(string s) { byte[] b = Encoding.UTF8.GetBytes(s); p.AddRange(b); p.Add(0); while (p.Count % 4 != 0) p.Add(0); }
-                Add(addr); Add(",sTT"); Add(text); _client.Send(p.ToArray(), p.Count, "127.0.0.1", 9000);
+                Add(addr); Add(",sTT"); Add(text); _client.Send(p.ToArray(), p.Count, Program.Config.OscIP, Program.Config.OscPort);
             } catch { }
         }
         private static string FetchMusic() {
@@ -286,7 +288,11 @@ namespace XOSC
     {
         public const string AppVersion = "dev";
         public static AppConfig Config = new();
-        private static string _path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config", "xosc", "config.json");
+        
+        private static string _path = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) 
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "xosc", "config.json")
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config", "xosc", "config.json");
+
         private static string _chatIn = "";
         private static Mutex? _mtx; private static int _navPage = 0;
         private static readonly string[] _navLabels = { "Dashboard", "Statuses", "Chatbox", "Hardware", "Network", "Updater" };
@@ -455,7 +461,16 @@ namespace XOSC
             ImGui.PushStyleColor(ImGuiCol.ChildBg, ColBg);
             ImGui.BeginChild("##content", new Vector2(sw - 172, sh), ImGuiChildFlags.None, ImGuiWindowFlags.NoScrollbar); ImGui.Dummy(new Vector2(0, 24));
             switch (_navPage) {
-                case 0: Card("Dashboard", () => { ImGui.Text($"Engine State: {MusicChatEngine.PacketsSent}"); ImGui.InputText("Override##field", ref _chatIn, 128); if (ImGui.Button("Send")) { MusicChatEngine.SetManual(_chatIn); _chatIn = ""; } }); break;
+                case 0: Card("Dashboard", () => { 
+                    ImGui.Text($"Engine State: {MusicChatEngine.PacketsSent}"); 
+                    ImGui.InputText("Override##field", ref _chatIn, 128); 
+                    if (ImGui.Button("Send")) { MusicChatEngine.SetManual(_chatIn); _chatIn = ""; } 
+                    ImGui.Dummy(new Vector2(0, 10));
+                    ImGui.Separator();
+                    ImGui.Dummy(new Vector2(0, 10));
+                    if (ImGui.InputText("OSC IP", ref Config.OscIP, 64)) SaveConfig();
+                    if (ImGui.InputInt("OSC Port", ref Config.OscPort)) SaveConfig();
+                }); break;
                 case 1: Card("Statuses", () => { int toRem = -1; lock (MusicChatEngine.ListLock) { for (int i = 0; i < Config.StatusList.Count; i++) { string s = Config.StatusList[i]; ImGui.PushID(i); if (ImGui.InputText("##s", ref s, 100)) Config.StatusList[i] = s; ImGui.SameLine(); if (ImGui.Button("X")) toRem = i; ImGui.PopID(); } if (toRem != -1) { Config.StatusList.RemoveAt(toRem); SaveConfig(); } } if (ImGui.Button("+ Add")) Config.StatusList.Add("New Status"); }); break;
                 case 2: Card("Chatbox", () => { 
                     Toggle("Status Text", ref Config.StatusTextMode); 

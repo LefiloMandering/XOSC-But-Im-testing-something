@@ -77,7 +77,7 @@ To ensure XOSC can scrape your hardware names correctly from the VRChat logs, ad
 ---
 
 ## ⚙️ Configuration
-XOSC saves your preferences automatically to `/home/user/xosc/config.json`.
+XOSC saves your preferences automatically to `/home/user/.config/xosc/config.json` / `AppData\Roaming\xosc\config.json`.
 
 *   **Statuses:** Managed via the "Statuses" tab.
 *   **Toggles:** Choose exactly what info (Time, Distro, Weather, PC Stats) is sent to VRChat in the "Toggles" tab.
