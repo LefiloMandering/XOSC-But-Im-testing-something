@@ -107,7 +107,16 @@ namespace XOSC
 
         public static (string Load, string Vram, string Temp) GetGpuStats(string gUnit, string vUnit, string tUnit)
         {
-            string smi = IsLinux ? "/usr/bin/nvidia-smi" : "C:\\Windows\\System32\\nvidia-smi.exe";
+            string smi = "";
+            if (IsLinux) {
+                smi = "/usr/bin/nvidia-smi";
+            } else {
+                smi = "C:\\Windows\\System32\\nvidia-smi.exe";
+                if (!File.Exists(smi)) {
+                    smi = "C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvidia-smi.exe";
+                }
+            }
+
             if (File.Exists(smi)) {
                 try {
                     var psi = new ProcessStartInfo(smi, "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits") { RedirectStandardOutput = true, UseShellExecute = false };
@@ -402,6 +411,14 @@ namespace XOSC
         }
 
         public static string FindVrcLog() {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) {
+                string winPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "AppData", "LocalLow", "VRChat", "VRChat");
+                if (Directory.Exists(winPath)) {
+                    return Directory.GetFiles(winPath, "output_log_*.txt").OrderByDescending(File.GetLastWriteTime).FirstOrDefault();
+                }
+                return null;
+            }
+
             string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             string[] stems = { Path.Combine(home, ".local/share/Steam"), Path.Combine(home, ".var/app/com.valvesoftware.Steam/.local/share/Steam") };
             foreach (var b in stems) {
