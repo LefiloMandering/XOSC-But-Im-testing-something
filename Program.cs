@@ -308,7 +308,7 @@ namespace XOSC
 
     class Program
     {
-        public const string AppVersion = "dev";
+        public const string AppVersion = "b82fa51";
         public static AppConfig Config = new();
         
         private static string _path = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) 
