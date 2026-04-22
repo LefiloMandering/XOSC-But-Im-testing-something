@@ -251,7 +251,11 @@ namespace XOSC
                 if (cfg.CpuTempOn) c += $" ({HardwareService.GetCpuTemp(cfg.TempUnit)})";
                 string cpuL = cfg.CustomCpuNameOn ? cfg.CustomCpuName : (cfg.HwNameMode ? Stylize(_cpu) : "CPU");
                 string gpuL = cfg.CustomGpuNameOn ? cfg.CustomGpuName : (cfg.HwNameMode ? Stylize(_gpu) : "GPU");
-                lines.Add($"🖥️ {cpuL}: {c} | 🎮 {gpuL}: {g.Load} ({g.Temp})");
+                
+                // FIXED: Only append GPU temp if the toggle is actually turned on
+                string gTempStr = cfg.GpuTempOn ? $" ({g.Temp})" : "";
+                lines.Add($"🖥️ {cpuL}: {c} | 🎮 {gpuL}: {g.Load}{gTempStr}");
+                
                 var mem = new List<string>();
                 if (cfg.ShowRam) mem.Add($"🐏 ʳᵃᵐ: {HardwareService.GetRamUsage(cfg.RamUnit)}");
                 if (cfg.ShowVram) mem.Add($"🎞️ ᵛʳᵃᵐ: {g.Vram}");
@@ -308,7 +312,7 @@ namespace XOSC
 
     class Program
     {
-        public const string AppVersion = "b82fa51";
+        public const string AppVersion = "32d225b";
         public static AppConfig Config = new();
         
         private static string _path = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) 
