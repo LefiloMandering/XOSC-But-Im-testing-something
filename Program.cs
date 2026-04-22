@@ -109,7 +109,7 @@ namespace XOSC
 
         public static (string Load, string Vram, string Temp) GetGpuStats(string gUnit, string vUnit, string tUnit)
         {
-            string smi = "";
+            string smi = ""; // heh
             if (IsLinux) {
                 smi = "/usr/bin/nvidia-smi";
             } else {
