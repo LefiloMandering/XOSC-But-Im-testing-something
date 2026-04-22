@@ -26,8 +26,14 @@ namespace XOSC
     {
         public bool ChatboxEnabled = true;
         public int Interval = 1;
-        public string City = "";
-        public string Pronouns = "";
+        public string City = "Los Angeles";
+        public string CustomCity = "";
+        public string State = "California";
+        public string CustomState = "";
+        public string Country = "United States";
+        public string CustomCountry = "";
+        public string Pronouns = "They/Them";
+        public string CustomPronouns = "";
         public string StatusIcon = "";
         public bool ThinMode = false;
         public bool PcMode = false;
@@ -198,14 +204,17 @@ namespace XOSC
             var cfg = Program.Config;
             if (DateTime.Now < _manualE) { EngineState = "Manual"; SendOsc("/chatbox/input", $"💬 {_manualM}"); return; }
             if ((DateTime.Now - _lastR).TotalSeconds >= cfg.Interval) {
-                _music = FetchMusic(); if (cfg.WeatherMode && !string.IsNullOrEmpty(cfg.City)) _weather = (await new HttpClient().GetStringAsync($"https://wttr.in/{cfg.City}?format=%C+%t")).Trim();
+                _music = FetchMusic();
+                string actualCity = cfg.City == "Custom..." ? cfg.CustomCity : cfg.City;
+                if (cfg.WeatherMode && !string.IsNullOrEmpty(actualCity)) _weather = (await new HttpClient().GetStringAsync($"https://wttr.in/{Uri.EscapeDataString(actualCity)}?format=%C+%t")).Trim();
                 lock (ListLock) { if (cfg.AutoCycleStatus && cfg.StatusList.Count > 0) _statusIdx = (_statusIdx + 1) % cfg.StatusList.Count; }
                 _lastR = DateTime.Now;
             }
             if ((DateTime.Now - _lastS).TotalSeconds < Math.Max(cfg.Interval, 1.5)) return;
             var lines = new List<string>();
             lock (ListLock) { if (cfg.StatusTextMode && cfg.StatusList.Count > _statusIdx) { if (_statusIdx >= cfg.StatusList.Count) _statusIdx = 0; lines.Add(cfg.StatusList[_statusIdx]); } }
-            if (cfg.PronounsMode && !string.IsNullOrEmpty(cfg.Pronouns)) lines.Add($"{cfg.StatusIcon} {cfg.Pronouns}");
+            string actualPronouns = cfg.Pronouns == "Custom..." ? cfg.CustomPronouns : cfg.Pronouns;
+            if (cfg.PronounsMode && !string.IsNullOrEmpty(actualPronouns)) lines.Add($"{cfg.StatusIcon} {actualPronouns}");
             var env = new List<string>();
             if (cfg.TimeMode) env.Add($"🕒 {DateTime.Now:hh:mm tt}");
             if (cfg.DistroMode) env.Add("| " + (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Windows" : "Fedora"));
@@ -261,9 +270,7 @@ namespace XOSC
             string n = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", s = "ᵃᵇᶜᵈᵉᶠᵍʰᶦʲᵏˡᵐⁿᵒᵖᵠʳˢᵗᵘᵛʷˣʸᶻᵃᵇᶜᵈᵉᶠᵍʰᶦʲᵏˡᵐⁿᵒᵖᵠʳˢᵗᵘᵛʷˣʸᶻ⁰¹²³⁴⁵⁶⁷⁸⁹";
             StringBuilder sb = new(); foreach (char c in t) { int i = n.IndexOf(c); sb.Append(i != -1 ? s[i] : c); }
             return sb.ToString();
-        }
-        [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
-        [DllImport("user32.dll")] private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+        }[DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();[DllImport("user32.dll")] private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
     }
 
     class Program
@@ -275,6 +282,125 @@ namespace XOSC
         private static Mutex? _mtx; private static int _navPage = 0;
         private static readonly string[] _navLabels = { "Dashboard", "Statuses", "Chatbox", "Hardware", "Network", "Updater" };
         private static readonly Vector4 ColAccent = new(0.38f, 0.73f, 1.00f, 1f), ColBg = new(0.10f, 0.10f, 0.13f, 1f), ColSidebar = new(0.07f, 0.07f, 0.09f, 1f), ColCard = new(0.14f, 0.14f, 0.18f, 1f);
+
+        private static readonly string[] _pronounsList = { "He/Him", "She/Her", "They/Them", "He/They", "She/They", "It/Its", "Any", "Custom..." };
+        
+        // All 195 Recognized Countries
+        private static readonly string[] _countriesList = {
+            "Afghanistan", "Albania", "Algeria", "Andorra", "Angola", "Antigua and Barbuda", "Argentina", "Armenia", "Australia", "Austria",
+            "Azerbaijan", "Bahamas", "Bahrain", "Bangladesh", "Barbados", "Belarus", "Belgium", "Belize", "Benin", "Bhutan", "Bolivia",
+            "Bosnia and Herzegovina", "Botswana", "Brazil", "Brunei", "Bulgaria", "Burkina Faso", "Burundi", "Cabo Verde", "Cambodia",
+            "Cameroon", "Canada", "Central African Republic", "Chad", "Chile", "China", "Colombia", "Comoros", "Congo", "Costa Rica",
+            "Croatia", "Cuba", "Cyprus", "Czechia", "Democratic Republic of the Congo", "Denmark", "Djibouti", "Dominica", "Dominican Republic",
+            "Ecuador", "Egypt", "El Salvador", "Equatorial Guinea", "Eritrea", "Estonia", "Eswatini", "Ethiopia", "Fiji", "Finland", "France",
+            "Gabon", "Gambia", "Georgia", "Germany", "Ghana", "Greece", "Grenada", "Guatemala", "Guinea", "Guinea-Bissau", "Guyana", "Haiti",
+            "Honduras", "Hungary", "Iceland", "India", "Indonesia", "Iran", "Iraq", "Ireland", "Israel", "Italy", "Jamaica", "Japan", "Jordan",
+            "Kazakhstan", "Kenya", "Kiribati", "Kuwait", "Kyrgyzstan", "Laos", "Latvia", "Lebanon", "Lesotho", "Liberia", "Libya", "Liechtenstein",
+            "Lithuania", "Luxembourg", "Madagascar", "Malawi", "Malaysia", "Maldives", "Mali", "Malta", "Marshall Islands", "Mauritania",
+            "Mauritius", "Mexico", "Micronesia", "Moldova", "Monaco", "Mongolia", "Montenegro", "Morocco", "Mozambique", "Myanmar", "Namibia",
+            "Nauru", "Nepal", "Netherlands", "New Zealand", "Nicaragua", "Niger", "Nigeria", "North Korea", "North Macedonia", "Norway", "Oman",
+            "Pakistan", "Palau", "Palestine", "Panama", "Papua New Guinea", "Paraguay", "Peru", "Philippines", "Poland", "Portugal", "Qatar",
+            "Romania", "Russia", "Rwanda", "Saint Kitts and Nevis", "Saint Lucia", "Saint Vincent and the Grenadines", "Samoa", "San Marino",
+            "Sao Tome and Principe", "Saudi Arabia", "Senegal", "Serbia", "Seychelles", "Sierra Leone", "Singapore", "Slovakia", "Slovenia",
+            "Solomon Islands", "Somalia", "South Africa", "South Korea", "South Sudan", "Spain", "Sri Lanka", "Sudan", "Suriname", "Sweden",
+            "Switzerland", "Syria", "Tajikistan", "Tanzania", "Thailand", "Timor-Leste", "Togo", "Tonga", "Trinidad and Tobago", "Tunisia",
+            "Turkey", "Turkmenistan", "Tuvalu", "Uganda", "Ukraine", "United Arab Emirates", "United Kingdom", "United States", "Uruguay",
+            "Uzbekistan", "Vanuatu", "Vatican City", "Venezuela", "Vietnam", "Yemen", "Zambia", "Zimbabwe", "Custom..."
+        };
+
+        // Complete States/Provinces for Major Countries
+        private static readonly Dictionary<string, string[]> _statesMap = new() {
+            { "United States", new[] { "Alabama", "Alaska", "Arizona", "Arkansas", "California", "Colorado", "Connecticut", "Delaware", "Florida", "Georgia", "Hawaii", "Idaho", "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky", "Louisiana", "Maine", "Maryland", "Massachusetts", "Michigan", "Minnesota", "Mississippi", "Missouri", "Montana", "Nebraska", "Nevada", "New Hampshire", "New Jersey", "New Mexico", "New York", "North Carolina", "North Dakota", "Ohio", "Oklahoma", "Oregon", "Pennsylvania", "Rhode Island", "South Carolina", "South Dakota", "Tennessee", "Texas", "Utah", "Vermont", "Virginia", "Washington", "West Virginia", "Wisconsin", "Wyoming", "Custom..." } },
+            { "Canada", new[] { "Alberta", "British Columbia", "Manitoba", "New Brunswick", "Newfoundland and Labrador", "Nova Scotia", "Ontario", "Prince Edward Island", "Quebec", "Saskatchewan", "Northwest Territories", "Nunavut", "Yukon", "Custom..." } },
+            { "Australia", new[] { "New South Wales", "Victoria", "Queensland", "Western Australia", "South Australia", "Tasmania", "Australian Capital Territory", "Northern Territory", "Custom..." } },
+            { "United Kingdom", new[] { "England", "Scotland", "Wales", "Northern Ireland", "Custom..." } }
+        };
+
+        // Massive list of major cities for every state
+        private static readonly Dictionary<string, string[]> _citiesMap = new() {
+            // US Cities
+            { "Alabama", new[] { "Birmingham", "Montgomery", "Huntsville", "Mobile", "Custom..." } },
+            { "Alaska", new[] { "Anchorage", "Fairbanks", "Juneau", "Custom..." } },
+            { "Arizona", new[] { "Phoenix", "Tucson", "Mesa", "Custom..." } },
+            { "Arkansas", new[] { "Little Rock", "Fayetteville", "Fort Smith", "Custom..." } },
+            { "California", new[] { "Los Angeles", "San Francisco", "San Diego", "Sacramento", "San Jose", "Custom..." } },
+            { "Colorado", new[] { "Denver", "Colorado Springs", "Aurora", "Custom..." } },
+            { "Connecticut", new[] { "Bridgeport", "New Haven", "Hartford", "Custom..." } },
+            { "Delaware", new[] { "Wilmington", "Dover", "Newark", "Custom..." } },
+            { "Florida", new[] { "Miami", "Orlando", "Tampa", "Jacksonville", "Tallahassee", "Custom..." } },
+            { "Georgia", new[] { "Atlanta", "Augusta", "Savannah", "Custom..." } },
+            { "Hawaii", new[] { "Honolulu", "Hilo", "Kailua", "Custom..." } },
+            { "Idaho", new[] { "Boise", "Meridian", "Nampa", "Custom..." } },
+            { "Illinois", new[] { "Chicago", "Aurora", "Springfield", "Custom..." } },
+            { "Indiana", new[] { "Indianapolis", "Fort Wayne", "Evansville", "Custom..." } },
+            { "Iowa", new[] { "Des Moines", "Cedar Rapids", "Davenport", "Custom..." } },
+            { "Kansas", new[] { "Wichita", "Overland Park", "Kansas City", "Custom..." } },
+            { "Kentucky", new[] { "Louisville", "Lexington", "Bowling Green", "Custom..." } },
+            { "Louisiana", new[] { "New Orleans", "Baton Rouge", "Shreveport", "Custom..." } },
+            { "Maine", new[] { "Portland", "Lewiston", "Bangor", "Custom..." } },
+            { "Maryland", new[] { "Baltimore", "Annapolis", "Frederick", "Custom..." } },
+            { "Massachusetts", new[] { "Boston", "Worcester", "Springfield", "Custom..." } },
+            { "Michigan", new[] { "Detroit", "Grand Rapids", "Lansing", "Custom..." } },
+            { "Minnesota", new[] { "Minneapolis", "St. Paul", "Rochester", "Custom..." } },
+            { "Mississippi", new[] { "Jackson", "Gulfport", "Southaven", "Custom..." } },
+            { "Missouri", new[] { "Kansas City", "St. Louis", "Springfield", "Custom..." } },
+            { "Montana", new[] { "Billings", "Missoula", "Great Falls", "Custom..." } },
+            { "Nebraska", new[] { "Omaha", "Lincoln", "Bellevue", "Custom..." } },
+            { "Nevada", new[] { "Las Vegas", "Henderson", "Reno", "Custom..." } },
+            { "New Hampshire", new[] { "Manchester", "Nashua", "Concord", "Custom..." } },
+            { "New Jersey", new[] { "Newark", "Jersey City", "Paterson", "Custom..." } },
+            { "New Mexico", new[] { "Albuquerque", "Las Cruces", "Rio Rancho", "Custom..." } },
+            { "New York", new[] { "New York City", "Buffalo", "Rochester", "Albany", "Syracuse", "Custom..." } },
+            { "North Carolina", new[] { "Charlotte", "Raleigh", "Greensboro", "Custom..." } },
+            { "North Dakota", new[] { "Fargo", "Bismarck", "Grand Forks", "Custom..." } },
+            { "Ohio", new[] { "Columbus", "Cleveland", "Cincinnati", "Custom..." } },
+            { "Oklahoma", new[] { "Oklahoma City", "Tulsa", "Norman", "Custom..." } },
+            { "Oregon", new[] { "Portland", "Salem", "Eugene", "Custom..." } },
+            { "Pennsylvania", new[] { "Philadelphia", "Pittsburgh", "Allentown", "Custom..." } },
+            { "Rhode Island", new[] { "Providence", "Warwick", "Cranston", "Custom..." } },
+            { "South Carolina", new[] { "Charleston", "Columbia", "North Charleston", "Custom..." } },
+            { "South Dakota", new[] { "Sioux Falls", "Rapid City", "Aberdeen", "Custom..." } },
+            { "Tennessee", new[] { "Nashville", "Memphis", "Knoxville", "Custom..." } },
+            { "Texas", new[] { "Houston", "San Antonio", "Dallas", "Austin", "Fort Worth", "Custom..." } },
+            { "Utah", new[] { "Salt Lake City", "West Valley City", "Provo", "Custom..." } },
+            { "Vermont", new[] { "Burlington", "South Burlington", "Rutland", "Custom..." } },
+            { "Virginia", new[] { "Virginia Beach", "Norfolk", "Chesapeake", "Richmond", "Custom..." } },
+            { "Washington", new[] { "Seattle", "Spokane", "Tacoma", "Custom..." } },
+            { "West Virginia", new[] { "Charleston", "Huntington", "Morgantown", "Custom..." } },
+            { "Wisconsin", new[] { "Milwaukee", "Madison", "Green Bay", "Custom..." } },
+            { "Wyoming", new[] { "Cheyenne", "Casper", "Laramie", "Custom..." } },
+
+            // Canada Cities
+            { "Alberta", new[] { "Calgary", "Edmonton", "Red Deer", "Custom..." } },
+            { "British Columbia", new[] { "Vancouver", "Victoria", "Kelowna", "Custom..." } },
+            { "Manitoba", new[] { "Winnipeg", "Brandon", "Steinbach", "Custom..." } },
+            { "New Brunswick", new[] { "Moncton", "Saint John", "Fredericton", "Custom..." } },
+            { "Newfoundland and Labrador", new[] { "St. John's", "Corner Brook", "Mount Pearl", "Custom..." } },
+            { "Nova Scotia", new[] { "Halifax", "Sydney", "Truro", "Custom..." } },
+            { "Ontario", new[] { "Toronto", "Ottawa", "Mississauga", "Hamilton", "Custom..." } },
+            { "Prince Edward Island", new[] { "Charlottetown", "Summerside", "Stratford", "Custom..." } },
+            { "Quebec", new[] { "Montreal", "Quebec City", "Laval", "Custom..." } },
+            { "Saskatchewan", new[] { "Saskatoon", "Regina", "Prince Albert", "Custom..." } },
+            { "Northwest Territories", new[] { "Yellowknife", "Hay River", "Inuvik", "Custom..." } },
+            { "Nunavut", new[] { "Iqaluit", "Rankin Inlet", "Arviat", "Custom..." } },
+            { "Yukon", new[] { "Whitehorse", "Dawson City", "Watson Lake", "Custom..." } },
+
+            // Australia Cities
+            { "New South Wales", new[] { "Sydney", "Newcastle", "Wollongong", "Custom..." } },
+            { "Victoria", new[] { "Melbourne", "Geelong", "Ballarat", "Custom..." } },
+            { "Queensland", new[] { "Brisbane", "Gold Coast", "Sunshine Coast", "Custom..." } },
+            { "Western Australia", new[] { "Perth", "Mandurah", "Bunbury", "Custom..." } },
+            { "South Australia", new[] { "Adelaide", "Mount Gambier", "Gawler", "Custom..." } },
+            { "Tasmania", new[] { "Hobart", "Launceston", "Devonport", "Custom..." } },
+            { "Australian Capital Territory", new[] { "Canberra", "Custom..." } },
+            { "Northern Territory", new[] { "Darwin", "Alice Springs", "Katherine", "Custom..." } },
+
+            // UK Cities
+            { "England", new[] { "London", "Birmingham", "Manchester", "Liverpool", "Leeds", "Custom..." } },
+            { "Scotland", new[] { "Glasgow", "Edinburgh", "Aberdeen", "Dundee", "Custom..." } },
+            { "Wales", new[] { "Cardiff", "Swansea", "Newport", "Custom..." } },
+            { "Northern Ireland", new[] { "Belfast", "Derry", "Lisburn", "Custom..." } }
+        };
 
         public static void Main() {
             _mtx = new Mutex(true, "XOSC_VRC_Unique_Runner", out bool fresh); if (!fresh) Environment.Exit(0);
@@ -324,13 +450,56 @@ namespace XOSC
             switch (_navPage) {
                 case 0: Card("Dashboard", () => { ImGui.Text($"Engine State: {MusicChatEngine.PacketsSent}"); ImGui.InputText("Override##field", ref _chatIn, 128); if (ImGui.Button("Send")) { MusicChatEngine.SetManual(_chatIn); _chatIn = ""; } }); break;
                 case 1: Card("Statuses", () => { int toRem = -1; lock (MusicChatEngine.ListLock) { for (int i = 0; i < Config.StatusList.Count; i++) { string s = Config.StatusList[i]; ImGui.PushID(i); if (ImGui.InputText("##s", ref s, 100)) Config.StatusList[i] = s; ImGui.SameLine(); if (ImGui.Button("X")) toRem = i; ImGui.PopID(); } if (toRem != -1) { Config.StatusList.RemoveAt(toRem); SaveConfig(); } } if (ImGui.Button("+ Add")) Config.StatusList.Add("New Status"); }); break;
-                case 2: Card("Chatbox", () => { Toggle("Status Text", ref Config.StatusTextMode); Toggle("Pronouns", ref Config.PronounsMode); Toggle("Song Mode", ref Config.SongMode); Toggle("Time", ref Config.TimeMode); Toggle("Distro", ref Config.DistroMode); Toggle("Weather", ref Config.WeatherMode); Toggle("Thin Mode", ref Config.ThinMode); Toggle("Auto-Cycle", ref Config.AutoCycleStatus); ImGui.InputText("Pronouns##field", ref Config.Pronouns, 64); ImGui.InputText("Weather City##field", ref Config.City, 64); ImGui.SliderInt("Interval##slider", ref Config.Interval, 1, 60); }); break;
+                case 2: Card("Chatbox", () => { 
+                    Toggle("Status Text", ref Config.StatusTextMode); 
+                    Toggle("Pronouns##Toggle", ref Config.PronounsMode); 
+                    Toggle("Song Mode", ref Config.SongMode); 
+                    Toggle("Time", ref Config.TimeMode); 
+                    Toggle("Distro", ref Config.DistroMode); 
+                    Toggle("Weather", ref Config.WeatherMode); 
+                    Toggle("Thin Mode", ref Config.ThinMode); 
+                    Toggle("Auto-Cycle", ref Config.AutoCycleStatus); 
+                    
+                    DrawCombo("Pronouns", _pronounsList, ref Config.Pronouns, ref Config.CustomPronouns);
+                    DrawCombo("Country", _countriesList, ref Config.Country, ref Config.CustomCountry);
+                    
+                    string[] states = _statesMap.ContainsKey(Config.Country) ? _statesMap[Config.Country] : new[] { "Custom..." };
+                    DrawCombo("State", states, ref Config.State, ref Config.CustomState);
+                    
+                    string[] cities = _citiesMap.ContainsKey(Config.State) ? _citiesMap[Config.State] : new[] { "Custom..." };
+                    DrawCombo("City", cities, ref Config.City, ref Config.CustomCity);
+
+                    ImGui.SliderInt("Interval##slider", ref Config.Interval, 1, 60); 
+                }); break;
                 case 3: Card("Hardware", () => { Toggle("Show Stats", ref Config.PcMode); Toggle("Show RAM", ref Config.ShowRam); Toggle("Show VRAM", ref Config.ShowVram); Toggle("Stylized Names", ref Config.HwNameMode); Toggle("CPU Temp", ref Config.CpuTempOn); Toggle("GPU Temp", ref Config.GpuTempOn); Toggle("Custom CPU Name", ref Config.CustomCpuNameOn); if (Config.CustomCpuNameOn) ImGui.InputText("##c_cpu", ref Config.CustomCpuName, 32); Toggle("Custom GPU Name", ref Config.CustomGpuNameOn); if (Config.CustomGpuNameOn) ImGui.InputText("##c_gpu", ref Config.CustomGpuName, 32); }); break;
                 case 4: Card("Network", () => { Toggle("Internet Ping", ref Config.NetMode); }); break;
                 case 5: Card("Updater", () => { if (ImGui.Button("Check for Update")) Task.Run(() => Updater.CheckForUpdates()); if (Updater.NewVersionFound && ImGui.Button("Apply Update")) Updater.ApplyUpdate(); ImGui.Text($"Status: {Updater.Status}"); }); break;
             }
             ImGui.EndChild(); ImGui.PopStyleColor(); ImGui.End();
         }
+
+        static void DrawCombo(string label, string[] items, ref string selected, ref string customVal) {
+            int idx = Array.IndexOf(items, selected);
+            if (idx == -1) { 
+                // If a user manually edited the JSON and loaded a value not in the list, 
+                // automatically move it to the custom text box so it doesn't get deleted!
+                if (!string.IsNullOrEmpty(selected) && selected != "Custom...") customVal = selected;
+                idx = items.Length - 1; 
+                selected = "Custom..."; 
+            }
+            
+            if (ImGui.Combo(label, ref idx, items, items.Length)) { 
+                selected = items[idx]; 
+                SaveConfig(); 
+            }
+            
+            if (selected == "Custom...") { 
+                if (ImGui.InputText("Custom " + label, ref customVal, 64)) {
+                    SaveConfig();
+                }
+            }
+        }
+        
         static void Card(string t, Action d) { ImGui.SetCursorPosX(24); ImGui.TextColored(new Vector4(0.92f, 0.92f, 0.97f, 1f), t); ImGui.Dummy(new Vector2(0, 8)); ImGui.SetCursorPosX(24); ImGui.PushStyleColor(ImGuiCol.ChildBg, ColCard); ImGui.BeginChild($"##c{t}", new Vector2(ImGui.GetContentRegionAvail().X - 48, 0), ImGuiChildFlags.Borders | ImGuiChildFlags.AutoResizeY); ImGui.Dummy(new Vector2(0, 10)); d(); ImGui.Dummy(new Vector2(0, 10)); ImGui.EndChild(); ImGui.PopStyleColor(); }
         static void Toggle(string l, ref bool v) { if (ImGui.Checkbox(l, ref v)) SaveConfig(); }
         public static void SaveConfig() { try { Directory.CreateDirectory(Path.GetDirectoryName(_path)); var options = new JsonSerializerOptions { WriteIndented = true, IncludeFields = true }; File.WriteAllText(_path, JsonSerializer.Serialize(Config, options)); } catch { } }
