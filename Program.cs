@@ -285,7 +285,6 @@ namespace XOSC
 
         private static readonly string[] _pronounsList = { "He/Him", "She/Her", "They/Them", "He/They", "She/They", "It/Its", "Any", "Custom..." };
         
-        // All 195 Recognized Countries
         private static readonly string[] _countriesList = {
             "Afghanistan", "Albania", "Algeria", "Andorra", "Angola", "Antigua and Barbuda", "Argentina", "Armenia", "Australia", "Austria",
             "Azerbaijan", "Bahamas", "Bahrain", "Bangladesh", "Barbados", "Belarus", "Belgium", "Belize", "Benin", "Bhutan", "Bolivia",
@@ -307,18 +306,15 @@ namespace XOSC
             "Turkey", "Turkmenistan", "Tuvalu", "Uganda", "Ukraine", "United Arab Emirates", "United Kingdom", "United States", "Uruguay",
             "Uzbekistan", "Vanuatu", "Vatican City", "Venezuela", "Vietnam", "Yemen", "Zambia", "Zimbabwe", "Custom..."
         };
-
-        // Complete States/Provinces for Major Countries
+        
         private static readonly Dictionary<string, string[]> _statesMap = new() {
             { "United States", new[] { "Alabama", "Alaska", "Arizona", "Arkansas", "California", "Colorado", "Connecticut", "Delaware", "Florida", "Georgia", "Hawaii", "Idaho", "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky", "Louisiana", "Maine", "Maryland", "Massachusetts", "Michigan", "Minnesota", "Mississippi", "Missouri", "Montana", "Nebraska", "Nevada", "New Hampshire", "New Jersey", "New Mexico", "New York", "North Carolina", "North Dakota", "Ohio", "Oklahoma", "Oregon", "Pennsylvania", "Rhode Island", "South Carolina", "South Dakota", "Tennessee", "Texas", "Utah", "Vermont", "Virginia", "Washington", "West Virginia", "Wisconsin", "Wyoming", "Custom..." } },
             { "Canada", new[] { "Alberta", "British Columbia", "Manitoba", "New Brunswick", "Newfoundland and Labrador", "Nova Scotia", "Ontario", "Prince Edward Island", "Quebec", "Saskatchewan", "Northwest Territories", "Nunavut", "Yukon", "Custom..." } },
             { "Australia", new[] { "New South Wales", "Victoria", "Queensland", "Western Australia", "South Australia", "Tasmania", "Australian Capital Territory", "Northern Territory", "Custom..." } },
             { "United Kingdom", new[] { "England", "Scotland", "Wales", "Northern Ireland", "Custom..." } }
         };
-
-        // Massive list of major cities for every state
+        
         private static readonly Dictionary<string, string[]> _citiesMap = new() {
-            // US Cities
             { "Alabama", new[] { "Birmingham", "Montgomery", "Huntsville", "Mobile", "Custom..." } },
             { "Alaska", new[] { "Anchorage", "Fairbanks", "Juneau", "Custom..." } },
             { "Arizona", new[] { "Phoenix", "Tucson", "Mesa", "Custom..." } },
@@ -369,8 +365,6 @@ namespace XOSC
             { "West Virginia", new[] { "Charleston", "Huntington", "Morgantown", "Custom..." } },
             { "Wisconsin", new[] { "Milwaukee", "Madison", "Green Bay", "Custom..." } },
             { "Wyoming", new[] { "Cheyenne", "Casper", "Laramie", "Custom..." } },
-
-            // Canada Cities
             { "Alberta", new[] { "Calgary", "Edmonton", "Red Deer", "Custom..." } },
             { "British Columbia", new[] { "Vancouver", "Victoria", "Kelowna", "Custom..." } },
             { "Manitoba", new[] { "Winnipeg", "Brandon", "Steinbach", "Custom..." } },
@@ -384,8 +378,6 @@ namespace XOSC
             { "Northwest Territories", new[] { "Yellowknife", "Hay River", "Inuvik", "Custom..." } },
             { "Nunavut", new[] { "Iqaluit", "Rankin Inlet", "Arviat", "Custom..." } },
             { "Yukon", new[] { "Whitehorse", "Dawson City", "Watson Lake", "Custom..." } },
-
-            // Australia Cities
             { "New South Wales", new[] { "Sydney", "Newcastle", "Wollongong", "Custom..." } },
             { "Victoria", new[] { "Melbourne", "Geelong", "Ballarat", "Custom..." } },
             { "Queensland", new[] { "Brisbane", "Gold Coast", "Sunshine Coast", "Custom..." } },
@@ -394,8 +386,6 @@ namespace XOSC
             { "Tasmania", new[] { "Hobart", "Launceston", "Devonport", "Custom..." } },
             { "Australian Capital Territory", new[] { "Canberra", "Custom..." } },
             { "Northern Territory", new[] { "Darwin", "Alice Springs", "Katherine", "Custom..." } },
-
-            // UK Cities
             { "England", new[] { "London", "Birmingham", "Manchester", "Liverpool", "Leeds", "Custom..." } },
             { "Scotland", new[] { "Glasgow", "Edinburgh", "Aberdeen", "Dundee", "Custom..." } },
             { "Wales", new[] { "Cardiff", "Swansea", "Newport", "Custom..." } },
@@ -481,8 +471,6 @@ namespace XOSC
         static void DrawCombo(string label, string[] items, ref string selected, ref string customVal) {
             int idx = Array.IndexOf(items, selected);
             if (idx == -1) { 
-                // If a user manually edited the JSON and loaded a value not in the list, 
-                // automatically move it to the custom text box so it doesn't get deleted!
                 if (!string.IsNullOrEmpty(selected) && selected != "Custom...") customVal = selected;
                 idx = items.Length - 1; 
                 selected = "Custom..."; 
