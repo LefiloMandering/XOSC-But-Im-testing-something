@@ -120,9 +120,7 @@ namespace XOSC
                 smi = "/usr/bin/nvidia-smi";
             } else {
                 smi = "C:\\Windows\\System32\\nvidia-smi.exe";
-                if (!File.Exists(smi)) {
-                    smi = "C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvidia-smi.exe";
-                }
+                if (!File.Exists(smi)) smi = "C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvidia-smi.exe";
             }
 
             if (File.Exists(smi)) {
@@ -270,9 +268,7 @@ namespace XOSC
             EngineState = "Idle";
 
             if (statusWasAdded && cfg.AutoCycleStatus) {
-                lock (ListLock) {
-                    _statusIdx = (_statusIdx + 1) % cfg.StatusList.Count;
-                }
+                lock (ListLock) _statusIdx = (_statusIdx + 1) % cfg.StatusList.Count;
             }
         }
         private static void SendOsc(string addr, string text) {
@@ -446,12 +442,9 @@ namespace XOSC
         public static string FindVrcLog() {
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) {
                 string winPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "AppData", "LocalLow", "VRChat", "VRChat");
-                if (Directory.Exists(winPath)) {
-                    return Directory.GetFiles(winPath, "output_log_*.txt").OrderByDescending(File.GetLastWriteTime).FirstOrDefault();
-                }
+                if (Directory.Exists(winPath)) return Directory.GetFiles(winPath, "output_log_*.txt").OrderByDescending(File.GetLastWriteTime).FirstOrDefault();
                 return null;
             }
-
             string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             string[] stems = { Path.Combine(home, ".local/share/Steam"), Path.Combine(home, ".var/app/com.valvesoftware.Steam/.local/share/Steam") };
             foreach (var b in stems) {
@@ -492,98 +485,44 @@ namespace XOSC
                     ImGui.Text($"Engine State: {MusicChatEngine.PacketsSent}"); 
                     ImGui.InputText("Override##field", ref _chatIn, 128); 
                     if (ImGui.Button("Send")) { MusicChatEngine.SetManual(_chatIn); _chatIn = ""; } 
-                    ImGui.Dummy(new Vector2(0, 10));
-                    ImGui.Separator();
-                    ImGui.Dummy(new Vector2(0, 10));
+                    ImGui.Dummy(new Vector2(0, 10)); ImGui.Separator(); ImGui.Dummy(new Vector2(0, 10));
                     if (ImGui.InputText("OSC IP", ref Config.OscIP, 64)) SaveConfig();
                     if (ImGui.InputInt("OSC Port", ref Config.OscPort)) SaveConfig();
                 }); break;
                 case 1: Card("Statuses", () => {
                     lock (MusicChatEngine.ListLock) {
                         for (int i = 0; i < Config.StatusList.Count; i++) {
-                            ImGui.PushID(i);
-                            var item = Config.StatusList[i];
-                            bool isSelected = _selectedStatusIndices.Contains(i);
-                            if (ImGui.Checkbox("##select", ref isSelected)) {
-                                if (isSelected) _selectedStatusIndices.Add(i);
-                                else _selectedStatusIndices.Remove(i);
-                            }
+                            ImGui.PushID(i); var item = Config.StatusList[i]; bool isSelected = _selectedStatusIndices.Contains(i);
+                            if (ImGui.Checkbox("##select", ref isSelected)) { if (isSelected) _selectedStatusIndices.Add(i); else _selectedStatusIndices.Remove(i); }
                             ImGui.SameLine();
-
-                            if (ImGui.Button(item.IsFavorited ? "*" : "-")) {
-                                item.IsFavorited = !item.IsFavorited;
-                                var sortedList = Config.StatusList.OrderByDescending(s => s.IsFavorited).ToList();
-                                Config.StatusList = sortedList;
-                                SaveConfig();
-                                ImGui.PopID();
-                                break; 
-                            }
+                            if (ImGui.Button(item.IsFavorited ? "*" : "-")) { item.IsFavorited = !item.IsFavorited; Config.StatusList = Config.StatusList.OrderByDescending(s => s.IsFavorited).ToList(); SaveConfig(); ImGui.PopID(); break; }
                             ImGui.SameLine();
-
-                            if (ImGui.Button("^") && i > 0) {
-                                var prevItem = Config.StatusList[i - 1];
-                                if (item.IsFavorited == prevItem.IsFavorited) {
-                                    Config.StatusList[i] = prevItem;
-                                    Config.StatusList[i - 1] = item;
-                                    SaveConfig();
-                                }
-                            }
+                            if (ImGui.Button("^") && i > 0) { var prev = Config.StatusList[i - 1]; if (item.IsFavorited == prev.IsFavorited) { Config.StatusList[i] = prev; Config.StatusList[i - 1] = item; SaveConfig(); } }
                             ImGui.SameLine();
-
-                            if (ImGui.Button("v") && i < Config.StatusList.Count - 1) {
-                                var nextItem = Config.StatusList[i + 1];
-                                if (item.IsFavorited == nextItem.IsFavorited) {
-                                    Config.StatusList[i] = nextItem;
-                                    Config.StatusList[i + 1] = item;
-                                    SaveConfig();
-                                }
-                            }
+                            if (ImGui.Button("v") && i < Config.StatusList.Count - 1) { var next = Config.StatusList[i + 1]; if (item.IsFavorited == next.IsFavorited) { Config.StatusList[i] = next; Config.StatusList[i + 1] = item; SaveConfig(); } }
                             ImGui.SameLine();
-
                             string statusText = item.Text;
-                            if (ImGui.InputText("##s", ref statusText, 100))
-                            {
-                                item.Text = statusText;
-                                SaveConfig();
-                            }
+                            if (ImGui.InputText("##s", ref statusText, 100)) { item.Text = statusText; SaveConfig(); }
                             ImGui.PopID();
                         }
                     }
-
                     ImGui.Dummy(new Vector2(0, 10));
                     if (ImGui.Button("+ Add New Status")) Config.StatusList.Add(new StatusItem());
                     ImGui.SameLine();
-                    if (_selectedStatusIndices.Any()) {
-                        if (ImGui.Button("Remove Selected")) {
-                            var sorted = _selectedStatusIndices.ToList();
-                            sorted.Sort();
-                            for (int i = sorted.Count - 1; i >= 0; i--) {
-                                Config.StatusList.RemoveAt(sorted[i]);
-                            }
-                            _selectedStatusIndices.Clear();
-                            SaveConfig();
-                        }
+                    if (_selectedStatusIndices.Any() && ImGui.Button("Remove Selected")) {
+                        var sorted = _selectedStatusIndices.ToList(); sorted.Sort();
+                        for (int i = sorted.Count - 1; i >= 0; i--) Config.StatusList.RemoveAt(sorted[i]);
+                        _selectedStatusIndices.Clear(); SaveConfig();
                     }
                 }); break;
                 case 2: Card("Chatbox", () => { 
-                    Toggle("Status Text", ref Config.StatusTextMode); 
-                    Toggle("Pronouns##Toggle", ref Config.PronounsMode); 
-                    Toggle("Song Mode", ref Config.SongMode); 
-                    Toggle("Time", ref Config.TimeMode); 
-                    Toggle("Distro", ref Config.DistroMode); 
-                    Toggle("Weather", ref Config.WeatherMode); 
-                    Toggle("Thin Mode", ref Config.ThinMode); 
-                    Toggle("Auto-Cycle", ref Config.AutoCycleStatus); 
-                    
+                    Toggle("Status Text", ref Config.StatusTextMode); Toggle("Pronouns##Toggle", ref Config.PronounsMode); Toggle("Song Mode", ref Config.SongMode); Toggle("Time", ref Config.TimeMode); Toggle("Distro", ref Config.DistroMode); Toggle("Weather", ref Config.WeatherMode); Toggle("Thin Mode", ref Config.ThinMode); Toggle("Auto-Cycle", ref Config.AutoCycleStatus); 
                     DrawCombo("Pronouns", _pronounsList, ref Config.Pronouns, ref Config.CustomPronouns);
                     DrawCombo("Country", _countriesList, ref Config.Country, ref Config.CustomCountry);
-                    
                     string[] states = _statesMap.ContainsKey(Config.Country) ? _statesMap[Config.Country] : new[] { "Custom..." };
                     DrawCombo("State", states, ref Config.State, ref Config.CustomState);
-                    
                     string[] cities = _citiesMap.ContainsKey(Config.State) ? _citiesMap[Config.State] : new[] { "Custom..." };
                     DrawCombo("City", cities, ref Config.City, ref Config.CustomCity);
-
                     ImGui.SliderInt("Interval##slider", ref Config.Interval, 1, 60); 
                 }); break;
                 case 3: Card("Hardware", () => { Toggle("Show Stats", ref Config.PcMode); Toggle("Show RAM", ref Config.ShowRam); Toggle("Show VRAM", ref Config.ShowVram); Toggle("Stylized Names", ref Config.HwNameMode); Toggle("CPU Temp", ref Config.CpuTempOn); Toggle("GPU Temp", ref Config.GpuTempOn); Toggle("Custom CPU Name", ref Config.CustomCpuNameOn); if (Config.CustomCpuNameOn) ImGui.InputText("##c_cpu", ref Config.CustomCpuName, 32); Toggle("Custom GPU Name", ref Config.CustomGpuNameOn); if (Config.CustomGpuNameOn) ImGui.InputText("##c_gpu", ref Config.CustomGpuName, 32); }); break;
@@ -595,22 +534,9 @@ namespace XOSC
 
         static void DrawCombo(string label, string[] items, ref string selected, ref string customVal) {
             int idx = Array.IndexOf(items, selected);
-            if (idx == -1) { 
-                if (!string.IsNullOrEmpty(selected) && selected != "Custom...") customVal = selected;
-                idx = items.Length - 1; 
-                selected = "Custom..."; 
-            }
-            
-            if (ImGui.Combo(label, ref idx, items, items.Length)) { 
-                selected = items[idx]; 
-                SaveConfig(); 
-            }
-            
-            if (selected == "Custom...") { 
-                if (ImGui.InputText("Custom " + label, ref customVal, 64)) {
-                    SaveConfig();
-                }
-            }
+            if (idx == -1) { if (!string.IsNullOrEmpty(selected) && selected != "Custom...") customVal = selected; idx = items.Length - 1; selected = "Custom..."; }
+            if (ImGui.Combo(label, ref idx, items, items.Length)) { selected = items[idx]; SaveConfig(); }
+            if (selected == "Custom..." && ImGui.InputText("Custom " + label, ref customVal, 64)) SaveConfig();
         }
         
         static void Card(string t, Action d) { ImGui.SetCursorPosX(24); ImGui.TextColored(new Vector4(0.92f, 0.92f, 0.97f, 1f), t); ImGui.Dummy(new Vector2(0, 8)); ImGui.SetCursorPosX(24); ImGui.PushStyleColor(ImGuiCol.ChildBg, ColCard); ImGui.BeginChild($"##c{t}", new Vector2(ImGui.GetContentRegionAvail().X - 48, 0), ImGuiChildFlags.Borders | ImGuiChildFlags.AutoResizeY); ImGui.Dummy(new Vector2(0, 10)); d(); ImGui.Dummy(new Vector2(0, 10)); ImGui.EndChild(); ImGui.PopStyleColor(); }
@@ -619,52 +545,30 @@ namespace XOSC
         static void LoadConfig() {
             if (!File.Exists(_path)) return;
             try {
-                var rawJson = File.ReadAllText(_path);
-                var jsonNode = System.Text.Json.Nodes.JsonNode.Parse(rawJson);
+                var rawJson = File.ReadAllText(_path); var jsonNode = System.Text.Json.Nodes.JsonNode.Parse(rawJson);
                 if (jsonNode["StatusList"] is System.Text.Json.Nodes.JsonArray statusList && statusList.All(node => node is System.Text.Json.Nodes.JsonValue)) {
                     var stringList = JsonSerializer.Deserialize<List<string>>(statusList.ToJsonString());
                     var tempConfig = JsonSerializer.Deserialize<AppConfig>(rawJson);
-                    if (tempConfig != null && stringList != null) {
-                        tempConfig.StatusList = stringList.Select(s => new StatusItem { Text = s }).ToList();
-                        Config = tempConfig;
-                        SaveConfig(); 
-                        return;
-                    }
+                    if (tempConfig != null && stringList != null) { tempConfig.StatusList = stringList.Select(s => new StatusItem { Text = s }).ToList(); Config = tempConfig; SaveConfig(); return; }
                 }
-
                 var options = new JsonSerializerOptions { IncludeFields = true, Converters = { new StatusItemConverter() } };
-                var loaded = JsonSerializer.Deserialize<AppConfig>(rawJson, options);
-                if (loaded != null) Config = loaded;
+                var loaded = JsonSerializer.Deserialize<AppConfig>(rawJson, options); if (loaded != null) Config = loaded;
             } catch { }
         }
     }
     
-    public class StatusItemConverter : JsonConverter<List<StatusItem>>
-    {
-        public override List<StatusItem> Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
-        {
-            if (reader.TokenType == JsonTokenType.StartArray)
-            {
+    public class StatusItemConverter : JsonConverter<List<StatusItem>> {
+        public override List<StatusItem> Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options) {
+            if (reader.TokenType == JsonTokenType.StartArray) {
                 var list = new List<StatusItem>();
-                while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
-                {
-                    if (reader.TokenType == JsonTokenType.String)
-                    {
-                        list.Add(new StatusItem { Text = reader.GetString() });
-                    }
-                    else if (reader.TokenType == JsonTokenType.StartObject)
-                    {
-                        list.Add(JsonSerializer.Deserialize<StatusItem>(ref reader, options));
-                    }
+                while (reader.Read() && reader.TokenType != JsonTokenType.EndArray) {
+                    if (reader.TokenType == JsonTokenType.String) list.Add(new StatusItem { Text = reader.GetString() });
+                    else if (reader.TokenType == JsonTokenType.StartObject) list.Add(JsonSerializer.Deserialize<StatusItem>(ref reader, options));
                 }
                 return list;
             }
             return new List<StatusItem>();
         }
-
-        public override void Write(Utf8JsonWriter writer, List<StatusItem> value, JsonSerializerOptions options)
-        {
-            JsonSerializer.Serialize(writer, value, options);
-        }
+        public override void Write(Utf8JsonWriter writer, List<StatusItem> value, JsonSerializerOptions options) => JsonSerializer.Serialize(writer, value, options);
     }
 }
