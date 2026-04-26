@@ -260,7 +260,6 @@ namespace XOSC
             string currentTempUnit = useFahrenheit ? "°F" : "°C";
             string currentWeather = useFahrenheit ? _weatherF : _weatherC;
 
-            // --- PAGE 1: Status, Env, Song & Visualizer ---
             var page1 = new List<string>();
             bool statusWasAdded = false;
             string statusText = null;
@@ -297,7 +296,6 @@ namespace XOSC
 
             if (cfg.NetMode) page1.Add($"🌐 {new System.Net.NetworkInformation.Ping().Send("1.1.1.1", 300).RoundtripTime}ms");
 
-            // --- PAGE 2: Hardware Stats (Includes shared status/time/distro) ---
             var page2 = new List<string>();
             if (cfg.PcMode) {
                 if (statusText != null) page2.Add(statusText);
@@ -321,13 +319,28 @@ namespace XOSC
                 if (mem.Count > 0) page2.Add(string.Join(" | ", mem));
             }
 
-            List<string> activePage = (page1.Count > 0 && page2.Count > 0) ? (_showHardwareTick = !_showHardwareTick) ? page2 : page1 : (page2.Count > 0) ? page2 : page1;
+            List<string> activePage;
+            if (page1.Count > 0 && page2.Count > 0) {
+                _showHardwareTick = !_showHardwareTick;
+                activePage = _showHardwareTick ? page2 : page1;
+            } else if (page2.Count > 0) {
+                _showHardwareTick = true;
+                activePage = page2;
+            } else {
+                _showHardwareTick = false;
+                activePage = page1;
+            }
+
             string output = string.Join("\n", activePage);
             if (cfg.ThinMode) { if (output.Length > 138) output = output.Substring(0, 138); output += "\u0003\u001f"; }
             SendOsc("/chatbox/input", output);
             _lastS = DateTime.Now;
             PacketsSent++;
-            if (!_showHardwareTick && statusWasAdded && cfg.AutoCycleStatus) lock (ListLock) _statusIdx = (_statusIdx + 1) % cfg.StatusList.Count;
+            EngineState = "Idle";
+
+            if (!_showHardwareTick && statusWasAdded && cfg.AutoCycleStatus) {
+                lock (ListLock) _statusIdx = (_statusIdx + 1) % cfg.StatusList.Count;
+            }
         }
         
         private static void SendOsc(string addr, string text) {
@@ -341,7 +354,8 @@ namespace XOSC
             int width = 8;
             int filled = (int)Math.Round((pos / len) * width);
             filled = Math.Clamp(filled, 0, width);
-            return $"[{new string('■', filled)}{new string('□', width - filled)}] {TimeSpan.FromSeconds(pos):m\\:ss}/{TimeSpan.FromSeconds(len):m\\:ss}";
+            string pBar = new string('■', filled) + new string('□', width - filled);
+            return $"[{pBar}] {TimeSpan.FromSeconds(pos):m\\:ss}/{TimeSpan.FromSeconds(len):m\\:ss}";
         }
 
         private static string MakeVisualizer() {
