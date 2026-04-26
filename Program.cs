@@ -442,7 +442,7 @@ namespace XOSC
 
     class Program
     {
-        public const string AppVersion = "dev";
+        public const string AppVersion = "317ee40";
         public static AppConfig Config = new();
         private static string _path = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "xosc", "config.json") : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config", "xosc", "config.json");
         private static string _chatIn = "";
