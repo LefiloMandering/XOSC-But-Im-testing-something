@@ -49,6 +49,7 @@ namespace XOSC
         public bool WeatherMode = false;
         public bool TimeMode = false;
         public bool SongMode = true;
+        public bool SongProgressMode = false;
         public bool NetMode = false;
         public bool VrcPingMode = false;
         public bool HwNameMode = false;
@@ -205,13 +206,27 @@ namespace XOSC
         private static UdpClient _client = new();
         private static CancellationTokenSource? _cts;
         private static int _statusIdx = 0;
-        private static string _cpu = "CPU", _gpu = "GPU", _music = "Chilling", _weather = "...";
+        private static bool _showHardwareTick = false;
+        private static string _cpu = "CPU", _gpu = "GPU", _weather = "...";
+        private static (string Title, double Position, double Length) _musicData = ("Chilling", 0, 0);
         private static DateTime _lastR = DateTime.MinValue, _lastS = DateTime.MinValue, _manualE = DateTime.MinValue;
         private static string _manualM = "";
         public static int PacketsSent = 0;
         public static string EngineState = "Idle";
         public static readonly object ListLock = new();
-        public static void Init() { _client = new UdpClient(); _cts?.Cancel(); _cts = new CancellationTokenSource(); ScrapeHardwareNames(); Task.Run(() => Loop(_cts.Token)); }
+        
+        private static Process? _psMediaProcess;
+        private static string _psMediaData = "Chilling|0|0";
+
+        public static void Init() { 
+            _client = new UdpClient(); 
+            _cts?.Cancel(); 
+            _cts = new CancellationTokenSource(); 
+            ScrapeHardwareNames(); 
+            StartWindowsMediaScraper();
+            Task.Run(() => Loop(_cts.Token)); 
+        }
+
         public static void SetManual(string m) { _manualM = m; _manualE = DateTime.Now.AddSeconds(20); }
         private static async Task Loop(CancellationToken t) { while (!t.IsCancellationRequested) { if (Program.Config.ChatboxEnabled) try { await Update(); } catch { } await Task.Delay(1000, t); } }
         private static async Task Update()
@@ -220,7 +235,7 @@ namespace XOSC
             if (DateTime.Now < _manualE) { EngineState = "Manual"; SendOsc("/chatbox/input", $"💬 {_manualM}"); return; }
 
             if ((DateTime.Now - _lastR).TotalSeconds >= cfg.Interval) {
-                _music = FetchMusic();
+                _musicData = FetchMusicData();
                 string actualCity = cfg.City == "Custom..." ? cfg.CustomCity : cfg.City;
                 if (cfg.WeatherMode && !string.IsNullOrEmpty(actualCity)) _weather = (await new HttpClient().GetStringAsync($"https://wttr.in/{Uri.EscapeDataString(actualCity)}?format=%C+%t")).Trim();
                 _lastR = DateTime.Now;
@@ -228,74 +243,208 @@ namespace XOSC
 
             if ((DateTime.Now - _lastS).TotalSeconds < Math.Max(cfg.Interval, 1.5)) return;
 
-            var lines = new List<string>();
+            // --- PAGE 1: General Info (Status, Env, Song) ---
+            var page1 = new List<string>();
             bool statusWasAdded = false;
+            string statusText = null;
+            
             lock (ListLock) {
                 if (cfg.StatusTextMode && cfg.StatusList.Count > 0) {
                     if (_statusIdx >= cfg.StatusList.Count) _statusIdx = 0;
-                    lines.Add(cfg.StatusList[_statusIdx].Text);
+                    statusText = cfg.StatusList[_statusIdx].Text;
+                    page1.Add(statusText);
                     statusWasAdded = true;
                 }
             }
 
             string actualPronouns = cfg.Pronouns == "Custom..." ? cfg.CustomPronouns : cfg.Pronouns;
-            if (cfg.PronounsMode && !string.IsNullOrEmpty(actualPronouns)) lines.Add($"{cfg.StatusIcon} {actualPronouns}");
-            var env = new List<string>();
-            if (cfg.TimeMode) env.Add($"🕒 {DateTime.Now:hh:mm tt}");
-            if (cfg.DistroMode) env.Add("| " + (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Windows" : "Fedora"));
-            if (cfg.WeatherMode) env.Add($"| 🌤️ {_weather}");
-            if (env.Count > 0) lines.Add(string.Join(" ", env));
+            if (cfg.PronounsMode && !string.IsNullOrEmpty(actualPronouns)) page1.Add($"{cfg.StatusIcon} {actualPronouns}");
+            
+            var env1 = new List<string>();
+            if (cfg.TimeMode) env1.Add($"🕒 {DateTime.Now:hh:mm tt}");
+            if (cfg.DistroMode) env1.Add(RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Windows" : "Fedora");
+            if (cfg.WeatherMode) env1.Add($"🌤️ {_weather}");
+            if (env1.Count > 0) page1.Add(string.Join(" | ", env1));
+            
+            if (cfg.SongMode && _musicData.Title != "Chilling") {
+                string songStr = $"♪ {_musicData.Title}";
+                if (cfg.SongProgressMode) {
+                    string pBar = MakeProgressBar(_musicData.Position, _musicData.Length);
+                    if (!string.IsNullOrEmpty(pBar)) {
+                        songStr = $"{pBar}\n{songStr}";
+                    }
+                }
+                page1.Add(songStr);
+            } else if (cfg.SongMode && _musicData.Title == "Chilling") {
+                page1.Add($"♪ Chilling");
+            }
+
+            if (cfg.NetMode) page1.Add($"🌐 {new System.Net.NetworkInformation.Ping().Send("1.1.1.1", 300).RoundtripTime}ms");
+
+            // --- PAGE 2: Hardware Stats ---
+            var page2 = new List<string>();
             if (cfg.PcMode) {
+                // Re-add shared elements for the hardware page
+                if (statusText != null) page2.Add(statusText);
+                
+                var env2 = new List<string>();
+                if (cfg.TimeMode) env2.Add($"🕒 {DateTime.Now:hh:mm tt}");
+                if (cfg.DistroMode) env2.Add(RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Windows" : "Fedora");
+                if (env2.Count > 0) page2.Add(string.Join(" | ", env2));
+
                 var g = HardwareService.GetGpuStats(cfg.GpuUnit, cfg.VramUnit, cfg.TempUnit);
                 string c = cfg.CpuUnit == "Watt" ? "--W" : HardwareService.GetCpuLoad();
                 if (cfg.CpuTempOn) c += $" ({HardwareService.GetCpuTemp(cfg.TempUnit)})";
                 string cpuL = cfg.CustomCpuNameOn ? cfg.CustomCpuName : (cfg.HwNameMode ? Stylize(_cpu) : "CPU");
                 string gpuL = cfg.CustomGpuNameOn ? cfg.CustomGpuName : (cfg.HwNameMode ? Stylize(_gpu) : "GPU");
                 
-                // FIXED: Only append GPU temp if the toggle is actually turned on
                 string gTempStr = cfg.GpuTempOn ? $" ({g.Temp})" : "";
-                lines.Add($"🖥️ {cpuL}: {c} | 🎮 {gpuL}: {g.Load}{gTempStr}");
+                page2.Add($"🖥️ {cpuL}: {c} | 🎮 {gpuL}: {g.Load}{gTempStr}");
                 
                 var mem = new List<string>();
                 if (cfg.ShowRam) mem.Add($"🐏 ʳᵃᵐ: {HardwareService.GetRamUsage(cfg.RamUnit)}");
                 if (cfg.ShowVram) mem.Add($"🎞️ ᵛʳᵃᵐ: {g.Vram}");
-                if (mem.Count > 0) lines.Add(string.Join(" | ", mem));
+                if (mem.Count > 0) page2.Add(string.Join(" | ", mem));
             }
-            if (cfg.NetMode) lines.Add($"🌐 {new System.Net.NetworkInformation.Ping().Send("1.1.1.1", 300).RoundtripTime}ms");
-            if (cfg.SongMode && _music != "Chilling") lines.Add($"♪ {_music}");
 
-            string output = string.Join("\n", lines);
+            // --- PAGINATION LOGIC ---
+            List<string> activePage;
+            if (page1.Count > 0 && page2.Count > 0) {
+                // If both pages have content, alternate between them
+                _showHardwareTick = !_showHardwareTick;
+                activePage = _showHardwareTick ? page2 : page1;
+            } else if (page2.Count > 0) {
+                // Only hardware is enabled
+                _showHardwareTick = true;
+                activePage = page2;
+            } else {
+                // Only general info is enabled
+                _showHardwareTick = false;
+                activePage = page1;
+            }
+
+            string output = string.Join("\n", activePage);
             if (cfg.ThinMode) { if (output.Length > 138) output = output.Substring(0, 138); output += "\u0003\u001f"; }
             SendOsc("/chatbox/input", output);
             _lastS = DateTime.Now;
             PacketsSent++;
             EngineState = "Idle";
 
-            if (statusWasAdded && cfg.AutoCycleStatus) {
+            // Only cycle the status if we just displayed Page 1 (so we don't skip statuses while Hardware is showing)
+            if (!_showHardwareTick && statusWasAdded && cfg.AutoCycleStatus) {
                 lock (ListLock) _statusIdx = (_statusIdx + 1) % cfg.StatusList.Count;
             }
         }
+        
         private static void SendOsc(string addr, string text) {
             try { List<byte> p = new(); void Add(string s) { byte[] b = Encoding.UTF8.GetBytes(s); p.AddRange(b); p.Add(0); while (p.Count % 4 != 0) p.Add(0); }
                 Add(addr); Add(",sTT"); Add(text); _client.Send(p.ToArray(), p.Count, Program.Config.OscIP, Program.Config.OscPort);
             } catch { }
         }
-        private static string FetchMusic() {
+
+        private static string MakeProgressBar(double pos, double len) {
+            if (len <= 0) return "";
+            int width = 8;
+            int filled = (int)Math.Round((pos / len) * width);
+            filled = Math.Clamp(filled, 0, width);
+            string pBar = new string('■', filled) + new string('□', width - filled);
+
+            TimeSpan tPos = TimeSpan.FromSeconds(pos);
+            TimeSpan tLen = TimeSpan.FromSeconds(len);
+            string sPos = tPos.Hours > 0 ? tPos.ToString(@"h\:mm\:ss") : tPos.ToString(@"m\:ss");
+            string sLen = tLen.Hours > 0 ? tLen.ToString(@"h\:mm\:ss") : tLen.ToString(@"m\:ss");
+
+            return $"[{pBar}] {sPos}/{sLen}";
+        }
+
+        private static void StartWindowsMediaScraper() {
+            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return;
+            try {
+                string script = @"[Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager, Windows.Media, ContentType = WindowsRuntime] | Out-Null
+                $m =[Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync().GetAwaiter().GetResult()
+                while($true) {
+                    try {
+                        $s = $m.GetCurrentSession()
+                        if ($s) {
+                            $t = $s.GetTimelineProperties()
+                            $i = $s.TryGetMediaPropertiesAsync().GetAwaiter().GetResult()
+                            $art = $i.Artist
+                            $tit = $i.Title
+                            $name = if ([string]::IsNullOrWhiteSpace($art)) { $tit } else { ""$art - $tit"" }
+                            if ([string]::IsNullOrWhiteSpace($name)) { $name = ""Chilling"" }
+                            $pos = if ($t) {[math]::Round($t.Position.TotalSeconds) } else { 0 }
+                            $end = if ($t) { [math]::Round($t.EndTime.TotalSeconds) } else { 0 }[Console]::WriteLine(""$name|$pos|$end"")
+                        } else {
+                            [Console]::WriteLine(""Chilling|0|0"")
+                        }
+                    } catch {
+                        [Console]::WriteLine(""Chilling|0|0"")
+                    }
+                    Start-Sleep -Seconds 1
+                }";
+
+                string b64 = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+                var psi = new ProcessStartInfo("powershell", $"-NoProfile -ExecutionPolicy Bypass -EncodedCommand {b64}") {
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                
+                _psMediaProcess = Process.Start(psi);
+                AppDomain.CurrentDomain.ProcessExit += (s, e) => { try { _psMediaProcess?.Kill(); } catch {} };
+
+                Task.Run(() => {
+                    if (_psMediaProcess != null) {
+                        using var sr = _psMediaProcess.StandardOutput;
+                        while (!sr.EndOfStream) {
+                            string? line = sr.ReadLine();
+                            if (!string.IsNullOrWhiteSpace(line)) _psMediaData = line;
+                        }
+                    }
+                });
+            } catch {}
+        }
+
+        private static (string Title, double Position, double Length) FetchMusicData() {
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) {
+                if (!string.IsNullOrEmpty(_psMediaData)) {
+                    var parts = _psMediaData.Split('|');
+                    if (parts.Length == 3) {
+                        double.TryParse(parts[1], out double pos);
+                        double.TryParse(parts[2], out double len);
+                        return (parts[0], pos, len);
+                    }
+                }
+
+                // Fallback to Window title scraping if PowerShell fails
                 StringBuilder buff = new StringBuilder(256); IntPtr handle = GetForegroundWindow();
                 if (GetWindowText(handle, buff, 256) > 0) {
                     string t = buff.ToString(); if (t.Contains("Spotify") || t.Contains("YouTube") || t.Contains("SoundCloud"))
-                        return Regex.Replace(t, @" - (Spotify|YouTube|SoundCloud).*", "").Trim();
+                        return (Regex.Replace(t, @" - (Spotify|YouTube|SoundCloud).*", "").Trim(), 0, 0);
                 }
-                return "Chilling";
+                return ("Chilling", 0, 0);
             }
+
+            // Linux Implementation
             try {
                 var psi = new ProcessStartInfo("playerctl", "metadata --format \"{{artist}} - {{title}}\"") { RedirectStandardOutput = true, UseShellExecute = false };
                 using var p = Process.Start(psi); string r = p?.StandardOutput.ReadToEnd().Trim() ?? "";
-                if (!string.IsNullOrEmpty(r) && r != " - ") return r;
-                return "Chilling";
-            } catch { return "Chilling"; }
+                if (!string.IsNullOrEmpty(r) && r != " - ") {
+                    double pos = 0, len = 0;
+                    try {
+                        var psiPos = new ProcessStartInfo("playerctl", "position") { RedirectStandardOutput = true, UseShellExecute = false };
+                        using var pPos = Process.Start(psiPos); double.TryParse(pPos?.StandardOutput.ReadToEnd().Trim(), out pos);
+
+                        var psiLen = new ProcessStartInfo("playerctl", "metadata mpris:length") { RedirectStandardOutput = true, UseShellExecute = false };
+                        using var pLen = Process.Start(psiLen);
+                        if (long.TryParse(pLen?.StandardOutput.ReadToEnd().Trim(), out long lMicro)) len = lMicro / 1000000.0;
+                    } catch {}
+                    return (r, pos, len);
+                }
+                return ("Chilling", 0, 0);
+            } catch { return ("Chilling", 0, 0); }
         }
+
         private static void ScrapeHardwareNames() {
             string log = Program.FindVrcLog();
             if (log != null) foreach (var l in File.ReadLines(log).Take(1500)) {
@@ -312,7 +461,7 @@ namespace XOSC
 
     class Program
     {
-        public const string AppVersion = "32d225b";
+        public const string AppVersion = "dev";
         public static AppConfig Config = new();
         
         private static string _path = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) 
@@ -520,7 +669,7 @@ namespace XOSC
                     }
                 }); break;
                 case 2: Card("Chatbox", () => { 
-                    Toggle("Status Text", ref Config.StatusTextMode); Toggle("Pronouns##Toggle", ref Config.PronounsMode); Toggle("Song Mode", ref Config.SongMode); Toggle("Time", ref Config.TimeMode); Toggle("Distro", ref Config.DistroMode); Toggle("Weather", ref Config.WeatherMode); Toggle("Thin Mode", ref Config.ThinMode); Toggle("Auto-Cycle", ref Config.AutoCycleStatus); 
+                    Toggle("Status Text", ref Config.StatusTextMode); Toggle("Pronouns##Toggle", ref Config.PronounsMode); Toggle("Song Mode", ref Config.SongMode); Toggle("Song Progress Bar", ref Config.SongProgressMode); Toggle("Time", ref Config.TimeMode); Toggle("Distro", ref Config.DistroMode); Toggle("Weather", ref Config.WeatherMode); Toggle("Thin Mode", ref Config.ThinMode); Toggle("Auto-Cycle", ref Config.AutoCycleStatus); 
                     DrawCombo("Pronouns", _pronounsList, ref Config.Pronouns, ref Config.CustomPronouns);
                     DrawCombo("Country", _countriesList, ref Config.Country, ref Config.CustomCountry);
                     string[] states = _statesMap.ContainsKey(Config.Country) ? _statesMap[Config.Country] : new[] { "Custom..." };
