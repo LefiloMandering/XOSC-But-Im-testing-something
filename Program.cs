@@ -65,7 +65,8 @@ namespace XOSC
         public string RamUnit = "GB";
         public string GpuUnit = "%";
         public string VramUnit = "GB";
-        public string TempUnit = "°C";
+        public bool AutoCycleTemp = true;
+        public string TempUnit = "°F";
         public List<StatusItem> StatusList { get; set; } = new();
         public bool AutoCycleStatus = false;
         public string PublishPath = "https://github.com/hollyntt/XOSC/raw/refs/heads/master/publish/XOSC.zip";
@@ -207,7 +208,13 @@ namespace XOSC
         private static CancellationTokenSource? _cts;
         private static int _statusIdx = 0;
         private static bool _showHardwareTick = false;
-        private static string _cpu = "CPU", _gpu = "GPU", _weather = "...";
+        private static string _cpu = "CPU", _gpu = "GPU";
+        
+        private static DateTime _lastWeatherFetch = DateTime.MinValue;
+        private static string _lastCity = "";
+        private static string _weatherF = "...";
+        private static string _weatherC = "...";
+        
         private static (string Title, double Position, double Length) _musicData = ("Chilling", 0, 0);
         private static DateTime _lastR = DateTime.MinValue, _lastS = DateTime.MinValue, _manualE = DateTime.MinValue;
         private static string _manualM = "";
@@ -234,14 +241,33 @@ namespace XOSC
             var cfg = Program.Config;
             if (DateTime.Now < _manualE) { EngineState = "Manual"; SendOsc("/chatbox/input", $"💬 {_manualM}"); return; }
 
+            // Fetch Music Data
             if ((DateTime.Now - _lastR).TotalSeconds >= cfg.Interval) {
                 _musicData = FetchMusicData();
-                string actualCity = cfg.City == "Custom..." ? cfg.CustomCity : cfg.City;
-                if (cfg.WeatherMode && !string.IsNullOrEmpty(actualCity)) _weather = (await new HttpClient().GetStringAsync($"https://wttr.in/{Uri.EscapeDataString(actualCity)}?format=%C+%t")).Trim();
                 _lastR = DateTime.Now;
             }
 
+            // Fetch Weather Data (Cached for 15 mins to prevent API bans)
+            string actualCity = cfg.City == "Custom..." ? cfg.CustomCity : cfg.City;
+            if (cfg.WeatherMode && !string.IsNullOrEmpty(actualCity)) {
+                if (actualCity != _lastCity || (DateTime.Now - _lastWeatherFetch).TotalMinutes >= 15) {
+                    _lastCity = actualCity;
+                    try {
+                        using var http = new HttpClient();
+                        _weatherF = (await http.GetStringAsync($"https://wttr.in/{Uri.EscapeDataString(actualCity)}?format=%C+%t&u")).Trim();
+                        _weatherC = (await http.GetStringAsync($"https://wttr.in/{Uri.EscapeDataString(actualCity)}?format=%C+%t&m")).Trim();
+                        _lastWeatherFetch = DateTime.Now;
+                    } catch { }
+                }
+            }
+
             if ((DateTime.Now - _lastS).TotalSeconds < Math.Max(cfg.Interval, 1.5)) return;
+
+            // Determine if we are using Fahrenheit or Celsius for this specific tick
+            // If AutoCycle is on, it flips every 5 seconds. If off, it locks to the user's setting.
+            bool useFahrenheit = cfg.AutoCycleTemp ? ((DateTime.Now.Second / 5) % 2 == 0) : (cfg.TempUnit == "°F");
+            string currentTempUnit = useFahrenheit ? "°F" : "°C";
+            string currentWeather = useFahrenheit ? _weatherF : _weatherC;
 
             // --- PAGE 1: General Info (Status, Env, Song) ---
             var page1 = new List<string>();
@@ -263,7 +289,7 @@ namespace XOSC
             var env1 = new List<string>();
             if (cfg.TimeMode) env1.Add($"🕒 {DateTime.Now:hh:mm tt}");
             if (cfg.DistroMode) env1.Add(RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Windows" : "Fedora");
-            if (cfg.WeatherMode) env1.Add($"🌤️ {_weather}");
+            if (cfg.WeatherMode) env1.Add($"🌤️ {currentWeather}");
             if (env1.Count > 0) page1.Add(string.Join(" | ", env1));
             
             if (cfg.SongMode && _musicData.Title != "Chilling") {
@@ -284,7 +310,6 @@ namespace XOSC
             // --- PAGE 2: Hardware Stats ---
             var page2 = new List<string>();
             if (cfg.PcMode) {
-                // Re-add shared elements for the hardware page
                 if (statusText != null) page2.Add(statusText);
                 
                 var env2 = new List<string>();
@@ -292,9 +317,9 @@ namespace XOSC
                 if (cfg.DistroMode) env2.Add(RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Windows" : "Fedora");
                 if (env2.Count > 0) page2.Add(string.Join(" | ", env2));
 
-                var g = HardwareService.GetGpuStats(cfg.GpuUnit, cfg.VramUnit, cfg.TempUnit);
+                var g = HardwareService.GetGpuStats(cfg.GpuUnit, cfg.VramUnit, currentTempUnit);
                 string c = cfg.CpuUnit == "Watt" ? "--W" : HardwareService.GetCpuLoad();
-                if (cfg.CpuTempOn) c += $" ({HardwareService.GetCpuTemp(cfg.TempUnit)})";
+                if (cfg.CpuTempOn) c += $" ({HardwareService.GetCpuTemp(currentTempUnit)})";
                 string cpuL = cfg.CustomCpuNameOn ? cfg.CustomCpuName : (cfg.HwNameMode ? Stylize(_cpu) : "CPU");
                 string gpuL = cfg.CustomGpuNameOn ? cfg.CustomGpuName : (cfg.HwNameMode ? Stylize(_gpu) : "GPU");
                 
@@ -310,15 +335,12 @@ namespace XOSC
             // --- PAGINATION LOGIC ---
             List<string> activePage;
             if (page1.Count > 0 && page2.Count > 0) {
-                // If both pages have content, alternate between them
                 _showHardwareTick = !_showHardwareTick;
                 activePage = _showHardwareTick ? page2 : page1;
             } else if (page2.Count > 0) {
-                // Only hardware is enabled
                 _showHardwareTick = true;
                 activePage = page2;
             } else {
-                // Only general info is enabled
                 _showHardwareTick = false;
                 activePage = page1;
             }
@@ -330,7 +352,7 @@ namespace XOSC
             PacketsSent++;
             EngineState = "Idle";
 
-            // Only cycle the status if we just displayed Page 1 (so we don't skip statuses while Hardware is showing)
+            // Only cycle the status if we just displayed Page 1
             if (!_showHardwareTick && statusWasAdded && cfg.AutoCycleStatus) {
                 lock (ListLock) _statusIdx = (_statusIdx + 1) % cfg.StatusList.Count;
             }
@@ -670,12 +692,24 @@ namespace XOSC
                 }); break;
                 case 2: Card("Chatbox", () => { 
                     Toggle("Status Text", ref Config.StatusTextMode); Toggle("Pronouns##Toggle", ref Config.PronounsMode); Toggle("Song Mode", ref Config.SongMode); Toggle("Song Progress Bar", ref Config.SongProgressMode); Toggle("Time", ref Config.TimeMode); Toggle("Distro", ref Config.DistroMode); Toggle("Weather", ref Config.WeatherMode); Toggle("Thin Mode", ref Config.ThinMode); Toggle("Auto-Cycle", ref Config.AutoCycleStatus); 
+                    
+                    Toggle("Auto-Cycle Temp (F/C)", ref Config.AutoCycleTemp);
+                    if (!Config.AutoCycleTemp) {
+                        int tIdx = Config.TempUnit == "°F" ? 1 : 0;
+                        string[] tUnits = { "°C", "°F" };
+                        if (ImGui.Combo("Locked Temp Unit", ref tIdx, tUnits, 2)) {
+                            Config.TempUnit = tUnits[tIdx];
+                            SaveConfig();
+                        }
+                    }
+
                     DrawCombo("Pronouns", _pronounsList, ref Config.Pronouns, ref Config.CustomPronouns);
                     DrawCombo("Country", _countriesList, ref Config.Country, ref Config.CustomCountry);
                     string[] states = _statesMap.ContainsKey(Config.Country) ? _statesMap[Config.Country] : new[] { "Custom..." };
                     DrawCombo("State", states, ref Config.State, ref Config.CustomState);
                     string[] cities = _citiesMap.ContainsKey(Config.State) ? _citiesMap[Config.State] : new[] { "Custom..." };
                     DrawCombo("City", cities, ref Config.City, ref Config.CustomCity);
+                    
                     ImGui.SliderInt("Interval##slider", ref Config.Interval, 1, 60); 
                 }); break;
                 case 3: Card("Hardware", () => { Toggle("Show Stats", ref Config.PcMode); Toggle("Show RAM", ref Config.ShowRam); Toggle("Show VRAM", ref Config.ShowVram); Toggle("Stylized Names", ref Config.HwNameMode); Toggle("CPU Temp", ref Config.CpuTempOn); Toggle("GPU Temp", ref Config.GpuTempOn); Toggle("Custom CPU Name", ref Config.CustomCpuNameOn); if (Config.CustomCpuNameOn) ImGui.InputText("##c_cpu", ref Config.CustomCpuName, 32); Toggle("Custom GPU Name", ref Config.CustomGpuNameOn); if (Config.CustomGpuNameOn) ImGui.InputText("##c_gpu", ref Config.CustomGpuName, 32); }); break;
