@@ -35,7 +35,7 @@ namespace XOSC
             new("Forest Green", new[]{ 0.30f, 0.85f, 0.50f }, new[]{ 0.06f, 0.11f, 0.08f }, new[]{ 0.04f, 0.08f, 0.05f }, new[]{ 0.09f, 0.15f, 0.11f }),
             new("Sunset Orange", new[]{ 1.00f, 0.55f, 0.20f }, new[]{ 0.13f, 0.09f, 0.07f }, new[]{ 0.09f, 0.06f, 0.05f }, new[]{ 0.18f, 0.12f, 0.09f }),
             new("Rose Pink", new[]{ 1.00f, 0.45f, 0.65f }, new[]{ 0.13f, 0.08f, 0.10f }, new[]{ 0.09f, 0.05f, 0.07f }, new[]{ 0.18f, 0.11f, 0.14f }),
-            new("Ice White", new[]{ 0.30f, 0.55f, 0.90f }, new[]{ 0.88f, 0.90f, 0.94f }, new[]{ 0.78f, 0.80f, 0.85f }, new[]{ 0.95f, 0.96f, 0.98f }),
+            new("Ice White", new[]{ 0.10f, 0.45f, 0.90f }, new[]{ 0.94f, 0.95f, 0.97f }, new[]{ 0.84f, 0.86f, 0.90f }, new[]{ 0.99f, 0.99f, 1.00f }),
             new("Deep Red", new[]{ 1.00f, 0.25f, 0.25f }, new[]{ 0.10f, 0.06f, 0.06f }, new[]{ 0.07f, 0.04f, 0.04f }, new[]{ 0.15f, 0.09f, 0.09f }),
             new("Cyberpunk", new[]{ 1.00f, 0.95f, 0.00f }, new[]{ 0.05f, 0.05f, 0.07f }, new[]{ 0.03f, 0.03f, 0.05f }, new[]{ 0.09f, 0.09f, 0.12f })
         };
@@ -167,7 +167,7 @@ namespace XOSC
 
     public static class MusicChatEngine
     {
-        private static UdpClient _client = new(); private static CancellationTokenSource? _cts; private static int _statusIdx = 0; private static bool _showHardwareTick = false; private static string _cpu = "CPU", _gpu = "GPU"; private static bool _isAfk = false; private static DateTime _lastWeatherFetch = DateTime.MinValue; private static int _weatherCode = 0; private static double _weatherTempC = 0; private static string _activeAlert = string.Empty; private static DateTime _alertExpire = DateTime.MinValue; private static (string Title, double Position, double Length) _musicData = ("Chilling", 0, 0); private static DateTime _lastR = DateTime.MinValue, _lastS = DateTime.MinValue, _manualE = DateTime.MinValue; private static string _manualM = ""; public static int PacketsSent = 0; public static string EngineState = "Idle"; public static readonly object ListLock = new(); private static Process? _psMediaProcess; private static string _psMediaData = "Chilling|0|0"; private static Random _visRand = new Random(); private static string[] _visBars = { " ", "▂", "▃", "▄", "▅", "▆", "▇", "█" };
+        private static UdpClient _client = new(); private static CancellationTokenSource? _cts; private static int _statusIdx = 0; private static bool _showHardwareTick = false; private static string _cpu = "CPU", _gpu = "GPU"; private static bool _isAfk = false; private static DateTime _lastWeatherFetch = DateTime.MinValue; private static int _weatherCode = 0; private static double _weatherTempC = 0; private static string _activeAlert = string.Empty; private static string _lastNotifiedAlert = string.Empty; private static DateTime _alertExpire = DateTime.MinValue; private static (string Title, double Position, double Length) _musicData = ("Chilling", 0, 0); private static DateTime _lastR = DateTime.MinValue, _lastS = DateTime.MinValue, _manualE = DateTime.MinValue; private static string _manualM = ""; public static int PacketsSent = 0; public static string EngineState = "Idle"; public static readonly object ListLock = new(); private static Process? _psMediaProcess; private static string _psMediaData = "Chilling|0|0"; private static Random _visRand = new Random(); private static string[] _visBars = { " ", "▂", "▃", "▄", "▅", "▆", "▇", "█" };
         public static string ActiveAlert => _activeAlert;
         
         public static void Init() { _client = new UdpClient(); _cts?.Cancel(); _cts = new CancellationTokenSource(); ScrapeHardwareNames(); StartWindowsMediaScraper(); Task.Run(() => Loop(_cts.Token)); }
@@ -209,22 +209,85 @@ namespace XOSC
             if (cfg.AfkDetectionMode) CheckAfk();
             if ((DateTime.Now - _lastS).TotalSeconds < Math.Max(cfg.Interval, 1.5)) return;
             
-            if (cfg.EasMode && _weatherCode >= 50) { string alert = GetAlertMsg(_weatherCode); string alertText = $"⚠️ This user is undergoing a emergency alert: {alert}\n🌡️ {_weatherTempC}°C / {(_weatherTempC * 9/5 + 32):F1}°F"; if (cfg.StylizeTextMode) alertText = Stylize(alertText); if (cfg.ThinMode) alertText += "\u0003\u001f"; SendOsc("/chatbox/input", alertText); _lastS = DateTime.Now; PacketsSent++; if ((DateTime.Now.Second % 30) == 0) Notify(alert); return; }
-            if (cfg.WeatherAlertMode && !string.IsNullOrEmpty(_activeAlert) && DateTime.Now < _alertExpire) { string alertText = _activeAlert; if (cfg.StylizeTextMode) alertText = Stylize(alertText); if (cfg.ThinMode) alertText += "\u0003\u001f"; SendOsc("/chatbox/input", alertText); _lastS = DateTime.Now; PacketsSent++; return; }
+            // Unified EAS: fire when WeatherAlertMode has fetched a real NWS alert
+            if ((cfg.EasMode || cfg.WeatherAlertMode) && !string.IsNullOrEmpty(_activeAlert) && DateTime.Now < _alertExpire)
+            {
+                // Notify the OS once per unique alert
+                if (_activeAlert != _lastNotifiedAlert)
+                {
+                    _lastNotifiedAlert = _activeAlert;
+                    NotifyOS(_activeAlert);
+                }
+                string alertText = $"⚠️ {_activeAlert}";
+                if (alertText.Length > 140) alertText = alertText[..140];
+                if (cfg.ThinMode) alertText += "\u0003\u001f";
+                SendOsc("/chatbox/input", alertText);
+                _lastS = DateTime.Now;
+                PacketsSent++;
+                EngineState = "Alert";
+                return;
+            }
             
             var page1 = new List<string>(); bool statusWasAdded = false; string statusText = null;
             lock (ListLock) { if (cfg.StatusTextMode && cfg.StatusList.Count > 0) { if (_statusIdx >= cfg.StatusList.Count) _statusIdx = 0; statusText = cfg.StatusList[_statusIdx].Text; page1.Add(_isAfk ? "AFK" : statusText); statusWasAdded = true; } }
-            string actualPronouns = cfg.Pronouns == "Custom..." ? cfg.CustomPronouns : cfg.Pronouns; if (cfg.PronounsMode && !string.IsNullOrEmpty(actualPronouns)) page1.Add($"{cfg.StatusIcon} {actualPronouns}");
-            var env1 = new List<string>(); if (cfg.TimeMode) { string timeFmt = cfg.MilitaryTime ? "HH:mm" : "hh:mm tt"; env1.Add($"🕒 {DateTime.Now.ToString(timeFmt)}"); } if (cfg.DistroMode) env1.Add(GetDistroName()); if (cfg.WeatherMode) env1.Add(WeatherCodeToString(_weatherCode, _weatherTempC, cfg.WeatherTempUnit)); if (env1.Count > 0) page1.Add(string.Join(" | ", env1));
-            if (cfg.SongMode && _musicData.Title != "Chilling") { string songStr = $"♪ {_musicData.Title}"; string topElement = ""; if (cfg.SongProgressMode && cfg.AudioVisualizerMode) topElement = ((DateTime.Now.Second / 5) % 2 == 0) ? MakeVisualizer() : MakeProgressBar(_musicData.Position, _musicData.Length); else if (cfg.AudioVisualizerMode) topElement = MakeVisualizer(); else if (cfg.SongProgressMode) topElement = MakeProgressBar(_musicData.Position, _musicData.Length); if (!string.IsNullOrEmpty(topElement)) songStr = $"{topElement}\n{songStr}"; page1.Add(songStr); } else if (cfg.SongMode && _musicData.Title == "Chilling") page1.Add($"♪ Chilling");
+            string actualPronouns = cfg.Pronouns == "Custom..." ? cfg.CustomPronouns : cfg.Pronouns;
+            if (cfg.PronounsMode && !string.IsNullOrEmpty(actualPronouns))
+                page1.Add($"{cfg.StatusIcon} {(cfg.StylizeTextMode ? Stylize(actualPronouns) : actualPronouns)}");
+            var env1 = new List<string>();
+            if (cfg.TimeMode) { string timeFmt = cfg.MilitaryTime ? "HH:mm" : "hh:mm tt"; string t = DateTime.Now.ToString(timeFmt); env1.Add($"🕒 {(cfg.StylizeTextMode ? Stylize(t) : t)}"); }
+            if (cfg.DistroMode) { string dn = GetDistroName(); env1.Add(cfg.StylizeTextMode ? Stylize(dn) : dn); }
+            if (cfg.WeatherMode) env1.Add(WeatherCodeToString(_weatherCode, _weatherTempC, cfg.WeatherTempUnit));
+            if (env1.Count > 0) page1.Add(string.Join(" | ", env1));
+            if (cfg.SongMode) {
+                string songTitle = _musicData.Title == "Chilling" ? "Chilling" : _musicData.Title;
+                string songStr = $"♪ {(cfg.StylizeTextMode ? Stylize(songTitle) : songTitle)}";
+                string topElement = "";
+                if (cfg.SongProgressMode && cfg.AudioVisualizerMode) topElement = ((DateTime.Now.Second / 5) % 2 == 0) ? MakeVisualizer() : MakeProgressBar(_musicData.Position, _musicData.Length);
+                else if (cfg.AudioVisualizerMode) topElement = MakeVisualizer();
+                else if (cfg.SongProgressMode) { topElement = MakeProgressBar(_musicData.Position, _musicData.Length); if (cfg.StylizeTextMode) topElement = Stylize(topElement); }
+                if (!string.IsNullOrEmpty(topElement)) songStr = $"{topElement}\n{songStr}";
+                page1.Add(songStr);
+            }
             if (cfg.NetMode) page1.Add($"🌐 {NetworkStats.AvgPing}ms ({NetworkStats.PacketLoss}% loss)");
-            var page2 = new List<string>(); if (cfg.PcMode) { if (statusText != null) page2.Add(_isAfk ? "AFK" : statusText); var env2 = new List<string>(); if (cfg.TimeMode) env2.Add($"🕒 {DateTime.Now.ToString(cfg.MilitaryTime ? "HH:mm" : "hh:mm tt")}"); if (cfg.DistroMode) env2.Add(GetDistroName()); if (env2.Count > 0) page2.Add(string.Join(" | ", env2)); var g = HardwareService.GetGpuStats(cfg.GpuUnit, cfg.VramUnit, "°C"); string c = cfg.CpuUnit == "Watt" ? "--W" : HardwareService.GetCpuLoad(); if (cfg.CpuTempOn) c += $" ({HardwareService.GetCpuTemp("°C")})"; string cpuL = cfg.CustomCpuNameOn ? cfg.CustomCpuName : (cfg.HwNameMode ? Stylize(_cpu) : "CPU"); string gpuL = cfg.CustomGpuNameOn ? cfg.CustomGpuName : (cfg.HwNameMode ? Stylize(_gpu) : "GPU"); string gTempStr = cfg.GpuTempOn ? $" ({g.Temp})" : ""; page2.Add($"🖥️ {cpuL}: {c} | 🎮 {gpuL}: {g.Load}{gTempStr}"); var mem = new List<string>(); if (cfg.ShowRam) mem.Add($"🐏 ʳᵃᵐ: {HardwareService.GetRamUsage(cfg.RamUnit)}"); if (cfg.ShowVram) mem.Add($"🎞️ ᵛʳᵃᵐ: {g.Vram}"); if (cfg.VrBatteryMode && RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) mem.Add($"🔋 VR: {GetVrBattery()}"); if (mem.Count > 0) page2.Add(string.Join(" | ", mem)); }
+            var page2 = new List<string>(); if (cfg.PcMode) { if (statusText != null) page2.Add(_isAfk ? "AFK" : statusText); var env2 = new List<string>(); if (cfg.TimeMode) { string t2 = DateTime.Now.ToString(cfg.MilitaryTime ? "HH:mm" : "hh:mm tt"); env2.Add($"🕒 {(cfg.StylizeTextMode ? Stylize(t2) : t2)}"); } if (cfg.DistroMode) { string dn2 = GetDistroName(); env2.Add(cfg.StylizeTextMode ? Stylize(dn2) : dn2); } if (env2.Count > 0) page2.Add(string.Join(" | ", env2)); var g = HardwareService.GetGpuStats(cfg.GpuUnit, cfg.VramUnit, "°C"); string c = cfg.CpuUnit == "Watt" ? "--W" : HardwareService.GetCpuLoad(); if (cfg.CpuTempOn) c += $" ({HardwareService.GetCpuTemp("°C")})"; string cpuL = cfg.CustomCpuNameOn ? cfg.CustomCpuName : (cfg.HwNameMode ? Stylize(_cpu) : "CPU"); string gpuL = cfg.CustomGpuNameOn ? cfg.CustomGpuName : (cfg.HwNameMode ? Stylize(_gpu) : "GPU"); string gTempStr = cfg.GpuTempOn ? $" ({g.Temp})" : ""; page2.Add($"🖥️ {cpuL}: {c} | 🎮 {gpuL}: {g.Load}{gTempStr}"); var mem = new List<string>(); if (cfg.ShowRam) mem.Add($"🐏 ʳᵃᵐ: {HardwareService.GetRamUsage(cfg.RamUnit)}"); if (cfg.ShowVram) mem.Add($"🎞️ ᵛʳᵃᵐ: {g.Vram}"); if (cfg.VrBatteryMode && RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) mem.Add($"🔋 VR: {GetVrBattery()}"); if (mem.Count > 0) page2.Add(string.Join(" | ", mem)); }
             List<string> activePage; if (page1.Count > 0 && page2.Count > 0) { _showHardwareTick = !_showHardwareTick; activePage = _showHardwareTick ? page2 : page1; } else if (page2.Count > 0) { _showHardwareTick = true; activePage = page2; } else { _showHardwareTick = false; activePage = page1; }
-            string output = string.Join("\n", activePage); if (cfg.StylizeTextMode) output = Stylize(output); if (cfg.ThinMode) { if (output.Length > 138) output = output.Substring(0, 138); output += "\u0003\u001f"; } SendOsc("/chatbox/input", output); _lastS = DateTime.Now; PacketsSent++; EngineState = "Idle";
+            string output = string.Join("\n", activePage); if (cfg.ThinMode) { if (output.Length > 138) output = output.Substring(0, 138); output += "\u0003\u001f"; } SendOsc("/chatbox/input", output); _lastS = DateTime.Now; PacketsSent++; EngineState = "Idle";
             if (!_showHardwareTick && statusWasAdded && cfg.AutoCycleStatus) lock (ListLock) _statusIdx = (_statusIdx + 1) % cfg.StatusList.Count;
         }
-        public static string GetAlertMsg(int code) { if (code >= 95) return "Thunderstorm"; if (code >= 70) return "Snow"; if (code >= 50) return "Rain"; return "General Alert"; }
-        public static void Notify(string alert) { string msg = $"This user is undergoing a emergency alert: {alert}"; if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) Process.Start(new ProcessStartInfo("powershell", $"-Command \"& {{Add-Type -AssemblyName System.Windows.Forms; $n = New-Object System.Windows.Forms.NotifyIcon; $n.Icon =[System.Drawing.SystemIcons]::Information; $n.Visible = $true; $n.ShowBalloonTip(5000, 'XOSC Alert', '{msg}',[System.Windows.Forms.ToolTipIcon]::Info)}}\"") { CreateNoWindow = true }); else Process.Start("notify-send", $"\"XOSC Alert\" \"{msg}\""); }
+        // Sends an urgent OS notification -- once per unique alert
+        public static void NotifyOS(string alertText)
+        {
+            // Strip characters that would break shell quoting
+            string safe = alertText.Replace("'", "").Replace("\"", "").Replace("\n", " ");
+            if (safe.Length > 200) safe = safe[..200] + "...";
+            try
+            {
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                {
+                    // Build PS command as a plain string -- no interpolated raw literals
+                    string psCmd = "Add-Type -AssemblyName System.Windows.Forms; "
+                                 + "$n = New-Object System.Windows.Forms.NotifyIcon; "
+                                 + "$n.Icon = [System.Drawing.SystemIcons]::Warning; "
+                                 + "$n.Visible = $true; "
+                                 + "$n.ShowBalloonTip(8000, 'XOSC Emergency Alert', '" + safe + "', [System.Windows.Forms.ToolTipIcon]::Warning); "
+                                 + "Start-Sleep -Seconds 9; "
+                                 + "$n.Visible = $false";
+                    Process.Start(new ProcessStartInfo(
+                        "powershell", "-NoProfile -WindowStyle Hidden -Command \"" + psCmd + "\"")
+                    { CreateNoWindow = true, UseShellExecute = false });
+                }
+                else
+                {
+                    // Linux: notify-send with critical urgency
+                    string args = "--urgency=critical --expire-time=10000 --icon=dialog-warning "
+                                + "\"XOSC Emergency Alert\" "
+                                + "\"" + safe + "\"";
+                    Process.Start(new ProcessStartInfo("notify-send", args)
+                    { UseShellExecute = false, CreateNoWindow = true });
+                }
+            }
+            catch { }
+        }
         private static void SendOsc(string addr, string text) { try { List<byte> p = new(); void Add(string s) { byte[] b = Encoding.UTF8.GetBytes(s); p.AddRange(b); p.Add(0); while (p.Count % 4 != 0) p.Add(0); } Add(addr); Add(",sTT"); Add(text); _client.Send(p.ToArray(), p.Count, Program.Config.OscIP, Program.Config.OscPort); } catch { } }
         private static string GetVrBattery() { try { var psi = new ProcessStartInfo("powershell", "-Command \"if (Get-Process vrserver -ErrorAction SilentlyContinue) { '85%' } else { '0%' }\"") { RedirectStandardOutput = true, CreateNoWindow = true, UseShellExecute = false }; using var p = Process.Start(psi); return p?.StandardOutput.ReadToEnd().Trim() ?? "0%"; } catch { return "0%"; } }
         private static void CheckAfk() { string log = Program.FindVrcLog(); if (log == null) return; try { using var fs = new FileStream(log, FileMode.Open, FileAccess.Read, FileShare.ReadWrite); using var sr = new StreamReader(fs); string line; string lastLine = ""; while ((line = sr.ReadLine()) != null) { lastLine = line; } if (lastLine.Contains("OnPlayerResting")) _isAfk = true; else if (lastLine.Contains("OnPlayerActive")) _isAfk = false; } catch { } }
@@ -261,13 +324,13 @@ namespace XOSC
     }
     class Program
     {
-        public const string AppVersion = "63beb7e";
+        public const string AppVersion = "14fc98d";
         public static AppConfig Config = new();
         private static string _path = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "xosc", "config.json") : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config", "xosc", "config.json");
         private static string _chatIn = "";
         private static Mutex? _mtx; private static int _navPage = 0;
         private static readonly string[] _navLabels = { "Dashboard", "Statuses", "Chatbox", "Hardware", "Network", "Appearance", "Misc", "Updater" };
-        private static Vector4 ColAccent, ColBg, ColSidebar, ColCard;
+        private static Vector4 ColAccent, ColBg, ColSidebar, ColCard, ColText, ColSubText;
         private static HashSet<int> _selectedStatusIndices = new();
         private static readonly string[] _pronounsList = { "He/Him", "She/Her", "They/Them", "He/They", "She/They", "It/Its", "Any", "Custom..." };
         private static readonly string[] _tempUnits = { "°F", "°C" };
@@ -279,7 +342,7 @@ namespace XOSC
 
         public static void Main() { 
             LoadConfig(); 
-            ColAccent = V4(Config.AccentColor); ColBg = V4(Config.BgColor); ColSidebar = V4(Config.SidebarColor); ColCard = V4(Config.CardColor); 
+            ColAccent = V4(Config.AccentColor); ColBg = V4(Config.BgColor); ColSidebar = V4(Config.SidebarColor); ColCard = V4(Config.CardColor); ColText = DeriveText(V4(Config.BgColor)); ColSubText = DeriveSubText(V4(Config.BgColor)); 
             _mtx = new Mutex(true, "XOSC_VRC_Unique_Runner", out bool fresh); 
             if (!fresh) Environment.Exit(0); 
             Directory.CreateDirectory(Path.GetDirectoryName(_path)); 
@@ -305,40 +368,140 @@ namespace XOSC
         public static string FindVrcLog() { if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) { string winPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "AppData", "LocalLow", "VRChat", "VRChat"); if (Directory.Exists(winPath)) return Directory.GetFiles(winPath, "output_log_*.txt").OrderByDescending(File.GetLastWriteTime).FirstOrDefault(); return null; } string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile); string[] stems = { Path.Combine(home, ".local/share/Steam"), Path.Combine(home, ".var/app/com.valvesoftware.Steam/.local/share/Steam") }; foreach (var b in stems) { if (!Directory.Exists(b)) continue; string vdf = Path.Combine(b, "steamapps", "libraryfolders.vdf"); List<string> libs = new() { b }; if (File.Exists(vdf)) { var ms = Regex.Matches(File.ReadAllText(vdf), "\"path\"\\s+\"(.+?)\""); foreach (Match m in ms) libs.Add(m.Groups[1].Value.Replace("\\\\", "/")); } foreach (var lib in libs) { string p = Path.Combine(lib, "steamapps/compatdata/438100/pfx/drive_c/users/steamuser/AppData/LocalLow/VRChat/VRChat"); if (Directory.Exists(p)) return Directory.GetFiles(p, "output_log_*.txt").OrderByDescending(File.GetLastWriteTime).FirstOrDefault(); } } return null; }
         public static string GetGpuPath() { if (!RuntimeInformation.IsOSPlatform(OSPlatform.Linux)) return null; return Directory.GetDirectories("/sys/class/drm/").Where(d => d.Contains("card")).OrderByDescending(d => File.Exists($"{d}/device/mem_info_vram_total") ? long.Parse(File.ReadAllText($"{d}/device/mem_info_vram_total").Trim()) : 0).FirstOrDefault(); }
         
-        static void ApplyTheme() { 
-            var s = ImGui.GetStyle(); 
-            s.WindowRounding = Config.WindowRounding; s.ChildRounding = Config.ChildRounding; s.FrameRounding = Config.FrameRounding; s.PopupRounding = Config.FrameRounding; s.ScrollbarRounding = Config.FrameRounding; s.GrabRounding = Config.FrameRounding; s.TabRounding = Config.TabRounding; s.WindowPadding = new Vector2(12, 12); 
+        // Derive readable text colours from the background brightness
+        static Vector4 DeriveText(Vector4 bg)
+        {
+            bool light = (bg.X + bg.Y + bg.Z) / 3f > 0.6f;
+            return light ? new Vector4(0.12f, 0.12f, 0.16f, 1f)
+                         : new Vector4(0.88f, 0.88f, 0.92f, 1f);
+        }
+        static Vector4 DeriveSubText(Vector4 bg)
+        {
+            bool light = (bg.X + bg.Y + bg.Z) / 3f > 0.6f;
+            return light ? new Vector4(0.35f, 0.35f, 0.42f, 1f)
+                         : new Vector4(0.52f, 0.52f, 0.60f, 1f);
+        }
+        static void ApplyTheme()
+        {
+            var s = ImGui.GetStyle();
+            s.WindowRounding    = Config.WindowRounding;
+            s.ChildRounding     = Config.ChildRounding;
+            s.FrameRounding     = Config.FrameRounding;
+            s.PopupRounding     = Config.FrameRounding;
+            s.ScrollbarRounding = Config.FrameRounding;
+            s.GrabRounding      = Config.FrameRounding;
+            s.TabRounding       = Config.TabRounding;
+            s.WindowPadding     = new Vector2(12, 12);
+            s.FramePadding      = new Vector2(8, 4);
+            s.ItemSpacing       = new Vector2(8, 6);
             ImGui.GetIO().FontGlobalScale = Config.FontScale;
+
+            // Keep cached Vector4 fields in sync — used by Card(), sidebar, alert banner
+            ColAccent  = V4(Config.AccentColor);
+            ColBg      = V4(Config.BgColor);
+            ColSidebar = V4(Config.SidebarColor);
+            ColCard    = V4(Config.CardColor);
+            ColText    = DeriveText(ColBg);
+            ColSubText = DeriveSubText(ColBg);
+
             var colors = ImGui.GetStyle().Colors;
-            var accent = V4(Config.AccentColor);
-            var frame = V4(Config.CardColor);
-            colors[(int)ImGuiCol.Button] = new Vector4(accent.X, accent.Y, accent.Z, 0.15f);
-            colors[(int)ImGuiCol.ButtonHovered] = new Vector4(accent.X, accent.Y, accent.Z, 0.35f);
-            colors[(int)ImGuiCol.ButtonActive] = new Vector4(accent.X, accent.Y, accent.Z, 0.55f);
-            colors[(int)ImGuiCol.CheckMark] = accent;
-            colors[(int)ImGuiCol.SliderGrab] = accent;
-            colors[(int)ImGuiCol.SliderGrabActive] = accent;
-            colors[(int)ImGuiCol.ScrollbarGrab] = accent;
-            colors[(int)ImGuiCol.ScrollbarGrabHovered] = new Vector4(accent.X, accent.Y, accent.Z, 0.8f);
-            colors[(int)ImGuiCol.ScrollbarGrabActive] = accent;
-            colors[(int)ImGuiCol.Header] = new Vector4(accent.X, accent.Y, accent.Z, 0.1f);
-            colors[(int)ImGuiCol.HeaderHovered] = new Vector4(accent.X, accent.Y, accent.Z, 0.3f);
-            colors[(int)ImGuiCol.HeaderActive] = new Vector4(accent.X, accent.Y, accent.Z, 0.5f);
-            colors[(int)ImGuiCol.FrameBg] = frame;
-            colors[(int)ImGuiCol.FrameBgHovered] = new Vector4(frame.X + 0.05f, frame.Y + 0.05f, frame.Z + 0.05f, frame.W);
-            colors[(int)ImGuiCol.FrameBgActive] = new Vector4(frame.X + 0.1f, frame.Y + 0.1f, frame.Z + 0.1f, frame.W);
-            colors[(int)ImGuiCol.WindowBg] = V4(Config.BgColor);
-            colors[(int)ImGuiCol.ChildBg] = V4(Config.CardColor);
-            colors[(int)ImGuiCol.PopupBg] = V4(Config.CardColor);
+            var a  = ColAccent;   // accent
+            var bg = ColBg;       // main background
+            var c  = ColCard;     // card / panel background
+
+            // Derive input/frame bg as slightly brighter than card so it reads as a distinct surface
+            float b = 0.07f; // brightness bump
+            var frame  = new Vector4(Math.Min(c.X+b, 1f), Math.Min(c.Y+b, 1f), Math.Min(c.Z+b, 1f), 1f);
+            var frameH = new Vector4(Math.Min(c.X+b+0.04f, 1f), Math.Min(c.Y+b+0.04f, 1f), Math.Min(c.Z+b+0.04f, 1f), 1f);
+            var frameA = new Vector4(Math.Min(c.X+b+0.08f, 1f), Math.Min(c.Y+b+0.08f, 1f), Math.Min(c.Z+b+0.08f, 1f), 1f);
+            var popup  = new Vector4(Math.Min(c.X+0.04f, 1f), Math.Min(c.Y+0.04f, 1f), Math.Min(c.Z+0.06f, 1f), 1f);
+
+            // ── Backgrounds ──────────────────────────────────────────────────
+            colors[(int)ImGuiCol.WindowBg]  = bg;
+            colors[(int)ImGuiCol.ChildBg]   = c;
+            colors[(int)ImGuiCol.PopupBg]   = popup;
+            colors[(int)ImGuiCol.MenuBarBg] = c;
+
+            // ── Frames (text inputs, sliders, combos, colour pickers) ────────
+            colors[(int)ImGuiCol.FrameBg]        = frame;
+            colors[(int)ImGuiCol.FrameBgHovered] = frameH;
+            colors[(int)ImGuiCol.FrameBgActive]  = frameA;
+
+            // ── Buttons ──────────────────────────────────────────────────────
+            colors[(int)ImGuiCol.Button]        = new Vector4(a.X, a.Y, a.Z, 0.20f);
+            colors[(int)ImGuiCol.ButtonHovered] = new Vector4(a.X, a.Y, a.Z, 0.40f);
+            colors[(int)ImGuiCol.ButtonActive]  = new Vector4(a.X, a.Y, a.Z, 0.65f);
+
+            // ── Checkmarks / sliders / scrollbar ─────────────────────────────
+            colors[(int)ImGuiCol.CheckMark]            = a;
+            colors[(int)ImGuiCol.SliderGrab]           = a;
+            colors[(int)ImGuiCol.SliderGrabActive]     = new Vector4(a.X, a.Y, a.Z, 0.85f);
+            colors[(int)ImGuiCol.ScrollbarBg]          = new Vector4(bg.X, bg.Y, bg.Z, 1f);
+            colors[(int)ImGuiCol.ScrollbarGrab]        = new Vector4(a.X, a.Y, a.Z, 0.35f);
+            colors[(int)ImGuiCol.ScrollbarGrabHovered] = new Vector4(a.X, a.Y, a.Z, 0.65f);
+            colors[(int)ImGuiCol.ScrollbarGrabActive]  = a;
+
+            // ── Combo / list-box row highlight (Header = selected row) ────────
+            colors[(int)ImGuiCol.Header]        = new Vector4(a.X, a.Y, a.Z, 0.22f);
+            colors[(int)ImGuiCol.HeaderHovered] = new Vector4(a.X, a.Y, a.Z, 0.38f);
+            colors[(int)ImGuiCol.HeaderActive]  = new Vector4(a.X, a.Y, a.Z, 0.55f);
+
+            // ── Title bars ───────────────────────────────────────────────────
+            colors[(int)ImGuiCol.TitleBg]          = c;
+            colors[(int)ImGuiCol.TitleBgActive]    = popup;
+            colors[(int)ImGuiCol.TitleBgCollapsed] = c;
+
+            // ── Tabs (corrected enum names for ImGui.NET 1.91.6) ─────────────
+            colors[(int)ImGuiCol.Tab]                        = c;
+            colors[(int)ImGuiCol.TabHovered]                 = new Vector4(a.X, a.Y, a.Z, 0.35f);
+            colors[(int)ImGuiCol.TabSelected]                = new Vector4(a.X, a.Y, a.Z, 0.25f);
+            colors[(int)ImGuiCol.TabSelectedOverline]        = a;
+            colors[(int)ImGuiCol.TabDimmed]                  = c;
+            colors[(int)ImGuiCol.TabDimmedSelected]          = new Vector4(a.X, a.Y, a.Z, 0.14f);
+            colors[(int)ImGuiCol.TabDimmedSelectedOverline]  = new Vector4(a.X, a.Y, a.Z, 0.40f);
+
+            // ── Separators ───────────────────────────────────────────────────
+            colors[(int)ImGuiCol.Separator]        = new Vector4(a.X, a.Y, a.Z, 0.22f);
+            colors[(int)ImGuiCol.SeparatorHovered] = new Vector4(a.X, a.Y, a.Z, 0.55f);
+            colors[(int)ImGuiCol.SeparatorActive]  = a;
+
+            // ── Resize grip ──────────────────────────────────────────────────
+            colors[(int)ImGuiCol.ResizeGrip]        = new Vector4(a.X, a.Y, a.Z, 0.18f);
+            colors[(int)ImGuiCol.ResizeGripHovered] = new Vector4(a.X, a.Y, a.Z, 0.45f);
+            colors[(int)ImGuiCol.ResizeGripActive]  = a;
+
+            // ── Borders ──────────────────────────────────────────────────────
+            colors[(int)ImGuiCol.Border]       = new Vector4(a.X, a.Y, a.Z, 0.18f);
+            colors[(int)ImGuiCol.BorderShadow] = new Vector4(0f, 0f, 0f, 0f);
+
+            // ── Text ─────────────────────────────────────────────────────────
+            // Use dark text on light themes (Ice White), light text on dark themes
+            bool lightTheme = (bg.X + bg.Y + bg.Z) / 3f > 0.6f;
+            colors[(int)ImGuiCol.Text]         = lightTheme
+                ? new Vector4(0.10f, 0.10f, 0.13f, 1f)
+                : new Vector4(0.92f, 0.92f, 0.95f, 1f);
+            colors[(int)ImGuiCol.TextDisabled] = lightTheme
+                ? new Vector4(0.40f, 0.40f, 0.45f, 1f)
+                : new Vector4(0.50f, 0.50f, 0.55f, 1f);
+            colors[(int)ImGuiCol.TextLink]     = a;
+
+            // ── Nav / drag-drop ──────────────────────────────────────────────
+            colors[(int)ImGuiCol.NavCursor]             = a;
+            colors[(int)ImGuiCol.DragDropTarget]        = a;
+            colors[(int)ImGuiCol.TextSelectedBg]        = new Vector4(a.X, a.Y, a.Z, 0.35f);
+            colors[(int)ImGuiCol.NavWindowingHighlight] = new Vector4(a.X, a.Y, a.Z, 0.70f);
+            colors[(int)ImGuiCol.NavWindowingDimBg]     = new Vector4(0f, 0f, 0f, 0.45f);
+            colors[(int)ImGuiCol.ModalWindowDimBg]      = new Vector4(0f, 0f, 0f, 0.45f);
         }
 
-        static void DrawUI() { 
+        static void DrawUI() {
+            ApplyTheme(); // re-apply every frame so colors are always current
             int w = Raylib.GetScreenWidth(), sh = Raylib.GetScreenHeight(); float sw = Config.SidebarWidth;
             ImGui.SetNextWindowPos(Vector2.Zero); ImGui.SetNextWindowSize(new Vector2(w, sh)); ImGui.Begin("##root", ImGuiWindowFlags.NoDecoration | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoScrollbar); 
             string alert = MusicChatEngine.ActiveAlert;
             if (!string.IsNullOrWhiteSpace(alert)) { ImGui.PushStyleColor(ImGuiCol.ChildBg, new Vector4(0.55f, 0.08f, 0.08f, 1f)); ImGui.BeginChild("##alertbanner", new Vector2(w, 30), ImGuiChildFlags.None, ImGuiWindowFlags.NoScrollbar); ImGui.SetCursorPos(new Vector2(10, 6)); ImGui.TextColored(new Vector4(1f, 0.85f, 0.85f, 1f), alert); ImGui.EndChild(); ImGui.PopStyleColor(); }
-            ImGui.PushStyleColor(ImGuiCol.ChildBg, ColSidebar); ImGui.BeginChild("##sidebar", new Vector2(sw, sh), ImGuiChildFlags.None, ImGuiWindowFlags.NoScrollbar); ImGui.Dummy(new Vector2(0, 20)); ImGui.SetCursorPosX(20); ImGui.TextColored(ColAccent, "XOSC"); ImGui.SetCursorPosX(20); ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.6f, 1f), $"v{AppVersion}"); ImGui.Dummy(new Vector2(0, 20)); 
-            for (int i = 0; i < _navLabels.Length; i++) { bool active = _navPage == i; ImGui.PushStyleColor(ImGuiCol.Button, active ? new Vector4(ColAccent.X, ColAccent.Y, ColAccent.Z, 0.15f) : Vector4.Zero); ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(ColAccent.X, ColAccent.Y, ColAccent.Z, 0.08f)); ImGui.PushStyleColor(ImGuiCol.Text, active ? ColAccent : new Vector4(0.72f, 0.72f, 0.80f, 1f)); ImGui.SetCursorPosX(10); if (ImGui.Button(_navLabels[i], new Vector2(sw - 20, 36))) _navPage = i; ImGui.PopStyleColor(3); } 
+            ImGui.PushStyleColor(ImGuiCol.ChildBg, ColSidebar); ImGui.BeginChild("##sidebar", new Vector2(sw, sh), ImGuiChildFlags.None, ImGuiWindowFlags.NoScrollbar); ImGui.Dummy(new Vector2(0, 20)); ImGui.SetCursorPosX(20); ImGui.TextColored(ColAccent, "XOSC"); ImGui.SetCursorPosX(20); ImGui.TextColored(ColSubText, $"v{AppVersion}"); ImGui.Dummy(new Vector2(0, 20)); 
+            for (int i = 0; i < _navLabels.Length; i++) { bool active = _navPage == i; ImGui.PushStyleColor(ImGuiCol.Button, active ? new Vector4(ColAccent.X, ColAccent.Y, ColAccent.Z, 0.15f) : Vector4.Zero); ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(ColAccent.X, ColAccent.Y, ColAccent.Z, 0.08f)); ImGui.PushStyleColor(ImGuiCol.Text, active ? ColAccent : ColText); ImGui.SetCursorPosX(10); if (ImGui.Button(_navLabels[i], new Vector2(sw - 20, 36))) _navPage = i; ImGui.PopStyleColor(3); } 
             ImGui.EndChild(); ImGui.PopStyleColor(); ImGui.SameLine(); ImGui.PushStyleColor(ImGuiCol.ChildBg, ColBg); ImGui.BeginChild("##content", new Vector2(w - sw, sh), ImGuiChildFlags.None, ImGuiWindowFlags.NoScrollbar); ImGui.Dummy(new Vector2(0, 24)); 
             switch (_navPage) { 
                 case 0: Card("Dashboard", () => { Toggle("Enable Chatbox", ref Config.ChatboxEnabled); ImGui.Text($"Engine State: {MusicChatEngine.EngineState}"); ImGui.Text($"Packets Sent: {MusicChatEngine.PacketsSent}"); ImGui.Text($"Weather Alert: {(string.IsNullOrEmpty(MusicChatEngine.ActiveAlert) ? "None" : "ACTIVE")}"); ImGui.Dummy(new Vector2(0, 6)); ImGui.InputText("Manual Message", ref _chatIn, 128); if (ImGui.Button("Send Manual")) { MusicChatEngine.SetManual(_chatIn); _chatIn = ""; } ImGui.Dummy(new Vector2(0, 10)); if (ImGui.InputText("OSC IP", ref Config.OscIP, 64)) SaveConfig(); if (ImGui.InputInt("OSC Port", ref Config.OscPort)) SaveConfig(); }); break; 
@@ -353,8 +516,19 @@ namespace XOSC
         }
         static void ColorPicker3(string label, float[] src, ref Vector4 col, Action<float[]> onChange) { var v = new Vector3(src[0], src[1], src[2]); if (ImGui.ColorEdit3(label, ref v)) { onChange(new[] { v.X, v.Y, v.Z }); col = new Vector4(v.X, v.Y, v.Z, 1f); ApplyTheme(); SaveConfig(); } }
         static void DrawCombo(string label, string[] items, ref string selected, ref string customVal) { int idx = Array.IndexOf(items, selected); if (idx == -1) { if (!string.IsNullOrEmpty(selected) && selected != "Custom...") customVal = selected; idx = items.Length - 1; selected = "Custom..."; } if (ImGui.Combo(label, ref idx, items, items.Length)) { selected = items[idx]; SaveConfig(); } if (selected == "Custom..." && ImGui.InputText("Custom " + label, ref customVal, 64)) SaveConfig(); }
-        static void Card(string t, Action d) { ImGui.SetCursorPosX(24); ImGui.TextColored(ColAccent, t); ImGui.Dummy(new Vector2(0, 8)); ImGui.SetCursorPosX(24); ImGui.PushStyleColor(ImGuiCol.ChildBg, ColCard); ImGui.BeginChild($"##c{t}", new Vector2(ImGui.GetContentRegionAvail().X - 48, 0), ImGuiChildFlags.Borders | ImGuiChildFlags.AutoResizeY); ImGui.Dummy(new Vector2(0, 10)); d(); ImGui.Dummy(new Vector2(0, 10)); ImGui.EndChild(); ImGui.PopStyleColor(); ImGui.Dummy(new Vector2(0, 10)); }
-        static void Toggle(string l, ref bool v) { if (ImGui.Checkbox(l, ref v)) { SaveConfig(); if (l == "EAS Alert Mode" && v) MusicChatEngine.Notify(MusicChatEngine.GetAlertMsg(50)); } }
+        static void Card(string t, Action d) {
+            ImGui.SetCursorPosX(24); ImGui.TextColored(ColAccent, t); ImGui.Dummy(new Vector2(0, 8)); ImGui.SetCursorPosX(24);
+            // Push both card background AND text colour derived from that surface
+            ImGui.PushStyleColor(ImGuiCol.ChildBg, ColCard);
+            ImGui.PushStyleColor(ImGuiCol.Text, DeriveText(ColCard));
+            ImGui.PushStyleColor(ImGuiCol.TextDisabled, DeriveSubText(ColCard));
+            ImGui.BeginChild($"##c{t}", new Vector2(ImGui.GetContentRegionAvail().X - 48, 0), ImGuiChildFlags.Borders | ImGuiChildFlags.AutoResizeY);
+            ImGui.Dummy(new Vector2(0, 10)); d(); ImGui.Dummy(new Vector2(0, 10));
+            ImGui.EndChild();
+            ImGui.PopStyleColor(3); // ChildBg + Text + TextDisabled
+            ImGui.Dummy(new Vector2(0, 10));
+        }
+        static void Toggle(string l, ref bool v) { if (ImGui.Checkbox(l, ref v)) SaveConfig(); }
         public static void SaveConfig() { try { Directory.CreateDirectory(Path.GetDirectoryName(_path)!); var options = new JsonSerializerOptions { WriteIndented = true, IncludeFields = true }; File.WriteAllText(_path, JsonSerializer.Serialize(Config, options)); } catch { } }
         static void LoadConfig() { if (!File.Exists(_path)) return; try { var rawJson = File.ReadAllText(_path); var jsonNode = System.Text.Json.Nodes.JsonNode.Parse(rawJson); if (jsonNode["StatusList"] is System.Text.Json.Nodes.JsonArray statusList && statusList.All(node => node is System.Text.Json.Nodes.JsonValue)) { var stringList = JsonSerializer.Deserialize<List<string>>(statusList.ToJsonString()); var tempConfig = JsonSerializer.Deserialize<AppConfig>(rawJson); if (tempConfig != null && stringList != null) { tempConfig.StatusList = stringList.Select(s => new StatusItem { Text = s }).ToList(); Config = tempConfig; SaveConfig(); return; } } var options = new JsonSerializerOptions { IncludeFields = true, Converters = { new StatusItemConverter() } }; var loaded = JsonSerializer.Deserialize<AppConfig>(rawJson, options); if (loaded != null) Config = loaded; } catch { } }
     }
