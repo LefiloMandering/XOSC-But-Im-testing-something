@@ -236,22 +236,21 @@ namespace XOSC
         private static string GetDistroName()
         {
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return "Windows";
-            // Read /etc/os-release — works on every systemd-based distro (Arch, Fedora, Ubuntu, etc.)
             try
             {
                 if (File.Exists("/etc/os-release"))
                 {
+                    string? name = null, versionId = null, prettyName = null;
                     foreach (var line in File.ReadLines("/etc/os-release"))
                     {
-                        // Prefer PRETTY_NAME ("CachyOS Linux"), fall back to NAME ("Arch Linux")
-                        if (line.StartsWith("PRETTY_NAME="))
-                            return line.Substring("PRETTY_NAME=".Length).Trim('"', '\'');
+                        if (line.StartsWith("NAME="))        name       = line["NAME=".Length..].Trim('"', '\'');
+                        if (line.StartsWith("VERSION_ID="))  versionId  = line["VERSION_ID=".Length..].Trim('"', '\'');
+                        if (line.StartsWith("PRETTY_NAME=")) prettyName = line["PRETTY_NAME=".Length..].Trim('"', '\'');
                     }
-                    foreach (var line in File.ReadLines("/etc/os-release"))
-                    {
-                        if (line.StartsWith("NAME="))
-                            return line.Substring("NAME=".Length).Trim('"', '\'');
-                    }
+
+                    // Just the first word — "Fedora Linux 43 (KDE...)" → "Fedora"
+                    string source = name ?? prettyName ?? "Linux";
+                    return source.Split(' ')[0];
                 }
             }
             catch { }
@@ -262,7 +261,7 @@ namespace XOSC
     }
     class Program
     {
-        public const string AppVersion = "418f6ae";
+        public const string AppVersion = "63beb7e";
         public static AppConfig Config = new();
         private static string _path = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "xosc", "config.json") : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config", "xosc", "config.json");
         private static string _chatIn = "";
