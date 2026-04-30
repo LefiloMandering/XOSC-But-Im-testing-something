@@ -251,7 +251,7 @@ namespace XOSC
             if (cfg.NetMode) page1.Add($"🌐 {NetworkStats.AvgPing}ms ({NetworkStats.PacketLoss}% loss)");
             var page2 = new List<string>(); if (cfg.PcMode) { if (statusText != null) page2.Add(_isAfk ? "AFK" : statusText); var env2 = new List<string>(); if (cfg.TimeMode) { string t2 = DateTime.Now.ToString(cfg.MilitaryTime ? "HH:mm" : "hh:mm tt"); env2.Add($"🕒 {(cfg.StylizeTextMode ? Stylize(t2) : t2)}"); } if (cfg.DistroMode) { string dn2 = GetDistroName(); env2.Add(cfg.StylizeTextMode ? Stylize(dn2) : dn2); } if (env2.Count > 0) page2.Add(string.Join(" | ", env2)); var g = HardwareService.GetGpuStats(cfg.GpuUnit, cfg.VramUnit, "°C"); string c = cfg.CpuUnit == "Watt" ? "--W" : HardwareService.GetCpuLoad(); if (cfg.CpuTempOn) c += $" ({HardwareService.GetCpuTemp("°C")})"; string cpuL = cfg.CustomCpuNameOn ? cfg.CustomCpuName : (cfg.HwNameMode ? Stylize(_cpu) : "CPU"); string gpuL = cfg.CustomGpuNameOn ? cfg.CustomGpuName : (cfg.HwNameMode ? Stylize(_gpu) : "GPU"); string gTempStr = cfg.GpuTempOn ? $" ({g.Temp})" : ""; page2.Add($"🖥️ {cpuL}: {c} | 🎮 {gpuL}: {g.Load}{gTempStr}"); var mem = new List<string>(); if (cfg.ShowRam) mem.Add($"🐏 ʳᵃᵐ: {HardwareService.GetRamUsage(cfg.RamUnit)}"); if (cfg.ShowVram) mem.Add($"🎞️ ᵛʳᵃᵐ: {g.Vram}"); if (cfg.VrBatteryMode && RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) mem.Add($"🔋 VR: {GetVrBattery()}"); if (mem.Count > 0) page2.Add(string.Join(" | ", mem)); }
             List<string> activePage; if (page1.Count > 0 && page2.Count > 0) { _showHardwareTick = !_showHardwareTick; activePage = _showHardwareTick ? page2 : page1; } else if (page2.Count > 0) { _showHardwareTick = true; activePage = page2; } else { _showHardwareTick = false; activePage = page1; }
-            string output = string.Join("\n", activePage); if (cfg.ThinMode) { if (output.Length > 138) output = output.Substring(0, 138); output += "\u0003\u001f"; } SendOsc("/chatbox/input", output); _lastS = DateTime.Now; PacketsSent++; EngineState = "Idle";
+            string output = string.Join("\n", activePage); if (cfg.ThinMode) { if (output.Length > 138) output = output.Substring(0, 138); output += "\u0003\u001f"; } SendOsc("/chatbox/input", output); _lastS = DateTime.Now; PacketsSent++; EngineState = "Chatting";
             if (!_showHardwareTick && statusWasAdded && cfg.AutoCycleStatus) lock (ListLock) _statusIdx = (_statusIdx + 1) % cfg.StatusList.Count;
         }
         // Sends an urgent OS notification -- once per unique alert
@@ -324,7 +324,7 @@ namespace XOSC
     }
     class Program
     {
-        public const string AppVersion = "14fc98d";
+        public const string AppVersion = "4942d14";
         public static AppConfig Config = new();
         private static string _path = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "xosc", "config.json") : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config", "xosc", "config.json");
         private static string _chatIn = "";
