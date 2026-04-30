@@ -288,7 +288,35 @@ namespace XOSC
             }
             catch { }
         }
-        private static void SendOsc(string addr, string text) { try { List<byte> p = new(); void Add(string s) { byte[] b = Encoding.UTF8.GetBytes(s); p.AddRange(b); p.Add(0); while (p.Count % 4 != 0) p.Add(0); } Add(addr); Add(",sTT"); Add(text); _client.Send(p.ToArray(), p.Count, Program.Config.OscIP, Program.Config.OscPort); } catch { } }
+        private static void SendOsc(string addr, string text) 
+        { 
+            try 
+            { 
+                List<byte> p = new(); 
+        
+                void Add(string s) 
+                { 
+                    byte[] b = Encoding.UTF8.GetBytes(s); 
+                    p.AddRange(b); 
+                    p.Add(0);
+                    while (p.Count % 4 != 0) p.Add(0);
+                } 
+        
+                Add(addr); 
+                Add(",s");
+                Add(text); 
+                
+                var ip = Program.Config.OscIP.Trim();
+                var port = Program.Config.OscPort;
+                if (string.IsNullOrEmpty(ip)) return;
+                
+                _client.Send(p.ToArray(), p.Count, ip, port); 
+            } 
+            catch (Exception ex) 
+            { 
+                Console.WriteLine($"[OSC Error]: {ex.Message}");
+            } 
+        }
         private static string GetVrBattery() { try { var psi = new ProcessStartInfo("powershell", "-Command \"if (Get-Process vrserver -ErrorAction SilentlyContinue) { '85%' } else { '0%' }\"") { RedirectStandardOutput = true, CreateNoWindow = true, UseShellExecute = false }; using var p = Process.Start(psi); return p?.StandardOutput.ReadToEnd().Trim() ?? "0%"; } catch { return "0%"; } }
         private static void CheckAfk() { string log = Program.FindVrcLog(); if (log == null) return; try { using var fs = new FileStream(log, FileMode.Open, FileAccess.Read, FileShare.ReadWrite); using var sr = new StreamReader(fs); string line; string lastLine = ""; while ((line = sr.ReadLine()) != null) { lastLine = line; } if (lastLine.Contains("OnPlayerResting")) _isAfk = true; else if (lastLine.Contains("OnPlayerActive")) _isAfk = false; } catch { } }
         private static string MakeProgressBar(double pos, double len) { if (len <= 0) return ""; int width = 8; int filled = (int)Math.Round((pos / len) * width); filled = Math.Clamp(filled, 0, width); return $"[{new string('■', filled)}{new string('□', width - filled)}] {TimeSpan.FromSeconds(pos):m\\:ss}/{TimeSpan.FromSeconds(len):m\\:ss}"; }
@@ -324,7 +352,7 @@ namespace XOSC
     }
     class Program
     {
-        public const string AppVersion = "4942d14";
+        public const string AppVersion = "9df709a";
         public static AppConfig Config = new();
         private static string _path = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "xosc", "config.json") : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config", "xosc", "config.json");
         private static string _chatIn = "";
