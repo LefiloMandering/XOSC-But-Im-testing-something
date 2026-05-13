@@ -474,7 +474,7 @@ ECHO is off.
     }
     class Program
     {
-         ".*";=public const string AppVersion = "3f54569";= "9df709a";
+        public const string AppVersion = "9df709a";
         public static AppConfig Config = new();
         private static string _path = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "xosc", "config.json") : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config", "xosc", "config.json");
         private static string _chatIn = "";
