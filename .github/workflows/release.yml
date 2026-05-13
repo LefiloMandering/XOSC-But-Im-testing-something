@@ -4,12 +4,13 @@ on:
   push:
     branches:
       - master
+  workflow_dispatch:  # Optional: allows manual trigger
 
 jobs:
   build-and-release:
     runs-on: windows-latest
     permissions:
-      contents: write   # ✅ This is REQUIRED - matches docs requirement
+      contents: write
 
     steps:
       - name: Checkout code
@@ -23,6 +24,22 @@ jobs:
       - name: Restore dependencies
         run: dotnet restore
 
+      - name: Get version from .csproj
+        id: get_version
+        run: |
+          # Read Version from XOSC.csproj
+          $xml = [xml](Get-Content XOSC.csproj)
+          $version = $xml.Project.PropertyGroup.Version
+          if (-not $version) {
+            $version = $xml.Project.PropertyGroup.AssemblyVersion
+          }
+          if (-not $version) {
+            $version = "1.0.0"
+          }
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+          echo "Found version: $version"
+        shell: powershell
+
       - name: Build project
         run: dotnet publish -c Release -o ./publish XOSC.csproj
 
@@ -32,18 +49,14 @@ jobs:
           Compress-Archive -Path * -DestinationPath XOSC.zip
           cd ..
 
-      - name: Get timestamp
-        id: timestamp
-        run: echo "date=$(Get-Date -Format 'yyyy-MM-dd-HHmm')" >> $env:GITHUB_OUTPUT
-        shell: powershell
-
       - name: Create Release
         uses: ncipollo/release-action@v1
         with:
           artifacts: ./publish/XOSC.zip
-          tag: release-${{ steps.timestamp.outputs.date }}
-          name: Release ${{ steps.timestamp.outputs.date }}
-          prerelease: true
+          tag: v${{ steps.get_version.outputs.version }}
+          name: v${{ steps.get_version.outputs.version }}
+          prerelease: false
           allowUpdates: true
+          generateReleaseNotes: true  # Auto-generates release notes from commits
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
