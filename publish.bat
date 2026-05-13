@@ -25,58 +25,40 @@ if /i "%CONFIG%"=="Debug" set "NEW_VER=%GIT_HASH%-debug"
 
 echo === Building %CONFIG% v%NEW_VER% ===
 
-:: === Robust Version Replacement ===
-echo Updating AppVersion in Program.cs...
-
+:: === SAFE Version Replacement ===
+echo Updating AppVersion...
 powershell -NoProfile -Command ^
     "$content = Get-Content 'Program.cs' -Raw; " ^
-    "$content = $content -replace 'public const string AppVersion\s*=\s*\".*?\";', 'public const string AppVersion = \"%NEW_VER%\";'; " ^
-    "Set-Content 'Program.cs' $content" 2>nul || (
-        echo Warning: PowerShell replace failed, trying simple method...
-        goto :simple_replace
-    )
-goto :replace_done
+    "$content = $content -replace 'public const string AppVersion\s*=\s*\"[^\"]*\";', 'public const string AppVersion = \"%NEW_VER%\";'; " ^
+    "Set-Content 'Program.cs' $content -NoNewline"
 
-:simple_replace
-:: Fallback pure batch (less reliable)
-(
-    for /f "usebackq delims=" %%a in ("Program.cs") do (
-        set "line=%%a"
-        set "line=!line:public const string AppVersion =.*;=public const string AppVersion = "%NEW_VER%";!"
-        echo !line!
-    )
-) > "Program.cs.tmp" && move /y "Program.cs.tmp" "Program.cs" >nul
-
-:replace_done
-
-:: Clean and Build
+:: Clean output
 if exist "%OUT%" rd /s /q "%OUT%" 2>nul
 
 echo Building Linux target...
-dotnet publish "%PROJ%" -c %CONFIG% -r linux-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o "%OUT%/linux-x64"
+dotnet publish "%PROJ%" -c %CONFIG% -r linux-x64 --self-contained true ^
+  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true ^
+  -p:EnableCompressionInSingleFile=true -o "%OUT%/linux-x64"
 
 echo Building Windows target...
-dotnet publish "%PROJ%" -c %CONFIG% -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o "%OUT%/win-x64"
+dotnet publish "%PROJ%" -c %CONFIG% -r win-x64 --self-contained true ^
+  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true ^
+  -p:EnableCompressionInSingleFile=true -o "%OUT%/win-x64"
 
 echo === Creating XOSC.zip ===
 if exist "%OUT%\XOSC.zip" del "%OUT%\XOSC.zip"
+powershell -NoProfile -Command "Compress-Archive -Path '%OUT%/linux-x64','%OUT%/win-x64' -DestinationPath '%OUT%/XOSC.zip' -Force"
 
-powershell -NoProfile -Command "Compress-Archive -Path '%OUT%/linux-x64','%OUT%/win-x64' -DestinationPath '%OUT%/XOSC.zip' -Force" 2>nul || (
-    tar -a -cf "%OUT%/XOSC.zip" -C "%OUT%" linux-x64 win-x64 2>nul || echo WARNING: Could not create zip
-)
-
-:: GitHub Release (Release config only)
 if /i "%CONFIG%"=="Release" (
     echo === Publishing to GitHub ===
     git add . 2>nul
     git commit -m "Release %NEW_VER%" 2>nul
     git push origin master 2>nul
     
-    where gh >nul 2>&1 && gh release create "%NEW_VER%" "%OUT%/XOSC.zip" --title "%NEW_VER%" --notes "Automated %CONFIG% build" 2>nul
+    where gh >nul 2>&1 && gh release create "%NEW_VER%" "%OUT%/XOSC.zip" --title "%NEW_VER%" --notes "Automated %CONFIG% build"
 )
 
 echo.
 echo === Done ===
-echo Version updated to: %NEW_VER%
-echo Output: %CD%\%OUT%
+echo Version set to: %NEW_VER%
 endlocal
