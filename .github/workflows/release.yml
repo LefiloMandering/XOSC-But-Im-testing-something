@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - master
-  workflow_dispatch:  # Optional: allows manual trigger
 
 jobs:
   build-and-release:
@@ -27,7 +26,6 @@ jobs:
       - name: Get version from .csproj
         id: get_version
         run: |
-          # Read Version from XOSC.csproj
           $xml = [xml](Get-Content XOSC.csproj)
           $version = $xml.Project.PropertyGroup.Version
           if (-not $version) {
@@ -43,20 +41,19 @@ jobs:
       - name: Build project
         run: dotnet publish -c Release -o ./publish XOSC.csproj
 
-      - name: Create ZIP archive
+      - name: Create ZIP archive of publish folder
         run: |
-          cd ./publish
-          Compress-Archive -Path * -DestinationPath XOSC.zip
-          cd ..
+          Compress-Archive -Path ./publish/* -DestinationPath XOSC.zip
+          Write-Host "Created XOSC.zip with contents from ./publish folder"
+        shell: powershell
 
       - name: Create Release
         uses: ncipollo/release-action@v1
         with:
-          artifacts: ./publish/XOSC.zip
+          artifacts: ./XOSC.zip
           tag: v${{ steps.get_version.outputs.version }}
           name: v${{ steps.get_version.outputs.version }}
-          prerelease: false
+          prerelease: true
           allowUpdates: true
-          generateReleaseNotes: true  # Auto-generates release notes from commits
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
