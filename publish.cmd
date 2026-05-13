@@ -25,8 +25,12 @@ if exist "%OUT%\XOSC.zip" (
     set "TAG=release-!mydate!-!mytime!"
     
     git tag -a "!TAG!" -m "Automated release build - XOSC.zip"
-    git push origin "!TAG!"
-    echo ✅ Released with tag: !TAG!
+    if !errorlevel! equ 0 (
+        git push origin "!TAG!"
+        echo ✅ Released with tag: !TAG!
+    ) else (
+        echo ❌ Tag creation failed
+    )
 ) else (
     echo ❌ Error: %OUT%\XOSC.zip not found. Build the project first.
 )
