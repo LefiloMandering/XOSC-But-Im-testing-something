@@ -108,14 +108,110 @@ namespace XOSC
         public float FrameRounding = 5f;
     }
 
+    public static class NativeMethods
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        public struct FILETIME { public uint dwLowDateTime; public uint dwHighDateTime; public ulong ToULong() => ((ulong)dwHighDateTime << 32) | dwLowDateTime; }
+        
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool GetSystemTimes(out FILETIME lpIdleTime, out FILETIME lpKernelTime, out FILETIME lpUserTime);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MEMORYSTATUSEX { public uint dwLength; public uint dwMemoryLoad; public ulong ullTotalPhys; public ulong ullAvailPhys; public ulong ullTotalPageFile; public ulong ullAvailPageFile; public ulong ullTotalVirtual; public ulong ullAvailVirtual; public ulong ullAvailExtendedVirtual; }
+        
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
+    }
+
     public static class HardwareService
     {
         private static long _lastTotal, _lastIdle;
+        private static ulong _prevIdleTime = 0, _prevSysTime = 0;
         private static bool IsLinux = RuntimeInformation.IsOSPlatform(OSPlatform.Linux);
-        public static string GetCpuLoad() { if (!IsLinux) return "??%"; try { if (!File.Exists("/proc/stat")) return "--"; var parts = File.ReadLines("/proc/stat").First().Split(' ', StringSplitOptions.RemoveEmptyEntries); long idle = long.Parse(parts[4]), total = parts.Skip(1).Select(long.Parse).Sum(); long dIdle = idle - _lastIdle, dTotal = total - _lastTotal; _lastIdle = idle; _lastTotal = total; return dTotal == 0 ? "0%" : Math.Round(100.0 * (1.0 - (double)dIdle / dTotal), 0) + "%"; } catch { return "--"; } }
+
+        public static string GetCpuLoad() { 
+            if (!IsLinux) {
+                try {
+                    // Fast native C# P/Invoke to Windows API (0% latency)
+                    if (NativeMethods.GetSystemTimes(out var idle, out var kernel, out var user)) {
+                        ulong idleTime = idle.ToULong();
+                        ulong sysTime = kernel.ToULong() + user.ToULong();
+                        
+                        // Ignore the very first tick to avoid calculating uptime load
+                        if (_prevSysTime == 0) {
+                            _prevIdleTime = idleTime;
+                            _prevSysTime = sysTime;
+                            return "0%"; 
+                        }
+
+                        ulong idleDiff = idleTime - _prevIdleTime;
+                        ulong sysDiff = sysTime - _prevSysTime;
+                        _prevIdleTime = idleTime;
+                        _prevSysTime = sysTime;
+
+                        if (sysDiff == 0) return "0%";
+                        double cpu = ((sysDiff - idleDiff) * 100.0) / sysDiff;
+                        return $"{Math.Clamp(Math.Round(cpu, 0), 0, 100)}%";
+                    }
+                } catch { }
+                return "--%"; 
+            }
+            // Linux Fallback
+            try { if (!File.Exists("/proc/stat")) return "--"; var parts = File.ReadLines("/proc/stat").First().Split(' ', StringSplitOptions.RemoveEmptyEntries); long idle = long.Parse(parts[4]), total = parts.Skip(1).Select(long.Parse).Sum(); long dIdle = idle - _lastIdle, dTotal = total - _lastTotal; _lastIdle = idle; _lastTotal = total; return dTotal == 0 ? "0%" : Math.Round(100.0 * (1.0 - (double)dIdle / dTotal), 0) + "%"; } catch { return "--"; } 
+        }
+        
         public static string GetCpuTemp(string unit) { if (!IsLinux) return "--"; try { string path = ""; if (Directory.Exists("/sys/class/hwmon/")) { foreach (var dir in Directory.GetDirectories("/sys/class/hwmon/")) { if (!File.Exists($"{dir}/name")) continue; string n = File.ReadAllText($"{dir}/name"); if (n.Contains("k10temp") || n.Contains("coretemp")) { if (File.Exists($"{dir}/temp1_input")) { path = $"{dir}/temp1_input"; break; } } } } if (string.IsNullOrEmpty(path)) return "--"; int c = int.Parse(File.ReadAllText(path).Trim()) / 1000; return unit == "°C" ? $"{c}°C" : $"{(c * 9 / 5) + 32}°F"; } catch { return "--"; } }
-        public static (string Load, string Vram, string Temp) GetGpuStats(string gUnit, string vUnit, string tUnit) { string smi = ""; if (IsLinux) { smi = "/usr/bin/nvidia-smi"; } else { smi = "C:\\Windows\\System32\\nvidia-smi.exe"; if (!File.Exists(smi)) smi = "C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvidia-smi.exe"; } if (File.Exists(smi)) { try { var psi = new ProcessStartInfo(smi, "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits") { RedirectStandardOutput = true, UseShellExecute = false }; using var p = Process.Start(psi); var v = p?.StandardOutput.ReadToEnd().Trim().Split(','); if (v?.Length >= 4) { string l = v[0].Trim() + "%"; long u = long.Parse(v[1].Trim()), t = long.Parse(v[2].Trim()); string vr = vUnit == "GB" ? $"{Math.Round(u / 1024.0, 1)}/{Math.Round(t / 1024.0, 1)}GB" : $"{(u * 100 / t)}%"; string tmp = tUnit == "°C" ? $"{v[3].Trim()}°C" : $"{(int.Parse(v[3].Trim()) * 9 / 5) + 32}°F"; return (l, vr, tmp); } } catch { } } if (!IsLinux) return ("--", "--", "--"); try { string gpu = Program.GetGpuPath(); if (string.IsNullOrEmpty(gpu)) return ("--", "--", "--"); string l = File.Exists($"{gpu}/device/gpu_busy_percent") ? File.ReadAllText($"{gpu}/device/gpu_busy_percent").Trim() + "%" : "--%"; long used = long.Parse(File.ReadAllText($"{gpu}/device/mem_info_vram_used").Trim()), total = long.Parse(File.ReadAllText($"{gpu}/device/mem_info_vram_total").Trim()); string vr = vUnit == "GB" ? $"{Math.Round(used / 1073741824.0, 1)}/{Math.Round(total / 1073741824.0, 1)}GB" : $"{Math.Round(100.0 * used / total, 0)}%"; string tmp = "--", hw = $"{gpu}/device/hwmon/"; if (Directory.Exists(hw)) { var d = Directory.GetDirectories(hw).FirstOrDefault(); if (d != null && File.Exists($"{d}/temp1_input")) { int c = int.Parse(File.ReadAllText($"{d}/temp1_input").Trim()) / 1000; tmp = tUnit == "°C" ? $"{c}°C" : $"{(c * 9 / 5) + 32}°F"; } } return (l, vr, tmp); } catch { return ("--", "--", "--"); } }
-        public static string GetRamUsage(string unit) { if (!IsLinux) return "??GB"; try { var m = File.ReadLines("/proc/meminfo").ToList(); long t = long.Parse(m.FirstOrDefault(x => x.StartsWith("MemTotal:"))?.Split(' ', StringSplitOptions.RemoveEmptyEntries)[1] ?? "0"); long a = long.Parse(m.FirstOrDefault(x => x.StartsWith("MemAvailable:"))?.Split(' ', StringSplitOptions.RemoveEmptyEntries)[1] ?? "0"); return unit == "GB" ? $"{Math.Round((t - a) / 1048576.0, 1)}/{Math.Round(t / 1048576.0, 1)}GB" : $"{Math.Round(100.0 * (t - a) / t, 0)}%"; } catch { return "--"; } }
+        
+        public static (string Load, string Vram, string Temp) GetGpuStats(string gUnit, string vUnit, string tUnit) { 
+            string smi = ""; 
+            if (IsLinux) { smi = "/usr/bin/nvidia-smi"; } 
+            else { 
+                smi = "C:\\Windows\\System32\\nvidia-smi.exe"; 
+                if (!File.Exists(smi)) smi = "C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvidia-smi.exe"; 
+            } 
+            if (File.Exists(smi)) { 
+                try { 
+                    var psi = new ProcessStartInfo(smi, "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true }; 
+                    using var p = Process.Start(psi); 
+                    var v = p?.StandardOutput.ReadToEnd().Trim().Split(','); 
+                    if (v?.Length >= 4) { 
+                        string l = v[0].Trim() + "%"; 
+                        long u = long.Parse(v[1].Trim()), t = long.Parse(v[2].Trim()); 
+                        string vr = vUnit == "GB" ? $"{Math.Round(u / 1024.0, 1)}/{Math.Round(t / 1024.0, 1)}GB" : $"{(u * 100 / t)}%"; 
+                        string tmp = tUnit == "°C" ? $"{v[3].Trim()}°C" : $"{(int.Parse(v[3].Trim()) * 9 / 5) + 32}°F"; 
+                        return (l, vr, tmp); 
+                    } 
+                } catch { } 
+            } 
+            if (!IsLinux) {
+                try {
+                    var psi = new ProcessStartInfo("powershell", "-NoProfile -Command \"$c = Get-Counter '\\GPU Engine(*engtype_3D)\\Utilization Percentage' -ErrorAction SilentlyContinue; if ($c) { [math]::Round(($c.CounterSamples | Measure-Object -Property CookedValue -Average).Average) } else { '--' }\"") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true };
+                    using var p = Process.Start(psi);
+                    p.WaitForExit(1000);
+                    string outStr = p.StandardOutput.ReadToEnd().Trim();
+                    if (!string.IsNullOrEmpty(outStr) && outStr != "--") return (outStr + "%", "--", "--");
+                } catch {}
+                return ("--%", "--", "--");
+            } 
+            try { string gpu = Program.GetGpuPath(); if (string.IsNullOrEmpty(gpu)) return ("--", "--", "--"); string l = File.Exists($"{gpu}/device/gpu_busy_percent") ? File.ReadAllText($"{gpu}/device/gpu_busy_percent").Trim() + "%" : "--%"; long used = long.Parse(File.ReadAllText($"{gpu}/device/mem_info_vram_used").Trim()), total = long.Parse(File.ReadAllText($"{gpu}/device/mem_info_vram_total").Trim()); string vr = vUnit == "GB" ? $"{Math.Round(used / 1073741824.0, 1)}/{Math.Round(total / 1073741824.0, 1)}GB" : $"{Math.Round(100.0 * used / total, 0)}%"; string tmp = "--", hw = $"{gpu}/device/hwmon/"; if (Directory.Exists(hw)) { var d = Directory.GetDirectories(hw).FirstOrDefault(); if (d != null && File.Exists($"{d}/temp1_input")) { int c = int.Parse(File.ReadAllText($"{d}/temp1_input").Trim()) / 1000; tmp = tUnit == "°C" ? $"{c}°C" : $"{(c * 9 / 5) + 32}°F"; } } return (l, vr, tmp); } catch { return ("--", "--", "--"); } 
+        }
+        
+        public static string GetRamUsage(string unit) { 
+            if (!IsLinux) {
+                try {
+                    NativeMethods.MEMORYSTATUSEX mem = new NativeMethods.MEMORYSTATUSEX();
+                    mem.dwLength = (uint)Marshal.SizeOf(typeof(NativeMethods.MEMORYSTATUSEX));
+                    if (NativeMethods.GlobalMemoryStatusEx(ref mem)) {
+                        long total = (long)mem.ullTotalPhys;
+                        long avail = (long)mem.ullAvailPhys;
+                        long used = total - avail;
+                        return unit == "GB" ? $"{Math.Round(used / 1073741824.0, 1)}/{Math.Round(total / 1073741824.0, 1)}GB" : $"{mem.dwMemoryLoad}%";
+                    }
+                } catch { }
+                return "--";
+            }
+            try { var m = File.ReadLines("/proc/meminfo").ToList(); long t = long.Parse(m.FirstOrDefault(x => x.StartsWith("MemTotal:"))?.Split(' ', StringSplitOptions.RemoveEmptyEntries)[1] ?? "0"); long a = long.Parse(m.FirstOrDefault(x => x.StartsWith("MemAvailable:"))?.Split(' ', StringSplitOptions.RemoveEmptyEntries)[1] ?? "0"); return unit == "GB" ? $"{Math.Round((t - a) / 1048576.0, 1)}/{Math.Round(t / 1048576.0, 1)}GB" : $"{Math.Round(100.0 * (t - a) / t, 0)}%"; } catch { return "--"; } 
+        }
     }
 
     public static class Updater { public static string Status = "idle"; public static bool NewVersionFound = false; private static byte[]? _pData; private const string StableApiUrl = "https://api.github.com/repos/hollyntt/XOSC/releases/latest"; public static async Task CheckForUpdates() { Status = "checking GitHub..."; NewVersionFound = false; try { using var http = new HttpClient(); http.DefaultRequestHeaders.Add("User-Agent", "XOSC-Updater"); var r = await http.GetStringAsync(StableApiUrl); using var doc = JsonDocument.Parse(r); string tag = doc.RootElement.GetProperty("tag_name").GetString() ?? ""; if (tag == Program.AppVersion) { Status = "already up to date"; return; } var asset = doc.RootElement.GetProperty("assets").EnumerateArray().FirstOrDefault(a => a.GetProperty("name").GetString() == "XOSC.zip"); string dUrl = asset.GetProperty("browser_download_url").GetString() ?? ""; var z = await http.GetByteArrayAsync(dUrl); using var ms = new MemoryStream(z); using var arch = new ZipArchive(ms); var entry = arch.GetEntry("linux-x64/XOSC") ?? arch.GetEntry("XOSC"); if (entry == null) { Status = "binary not found in zip"; return; } Status = "update found!"; NewVersionFound = true; using var es = entry.Open(); using var msw = new MemoryStream(); await es.CopyToAsync(msw); _pData = msw.ToArray(); } catch (Exception e) { Status = $"error: {e.Message}"; } } public static void ApplyUpdate() { if (_pData == null) return; try { string self = Environment.ProcessPath!; Program.SaveConfig(); File.Move(self, self + ".bak", true); File.WriteAllBytes(self, _pData); if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux)) Process.Start("chmod", $"+x \"{self}\"").WaitForExit(); Thread.Sleep(500); Process.Start(new ProcessStartInfo(self) { UseShellExecute = true }); Environment.Exit(0); } catch (Exception e) { Status = $"apply error: {e.Message}"; } } }
@@ -303,7 +399,7 @@ namespace XOSC
                 } 
         
                 Add(addr); 
-                Add(",s");
+                Add(addr == "/chatbox/input" ? ",sTF" : ",s"); 
                 Add(text); 
                 
                 var ip = Program.Config.OscIP.Trim();
@@ -321,8 +417,54 @@ namespace XOSC
         private static void CheckAfk() { string log = Program.FindVrcLog(); if (log == null) return; try { using var fs = new FileStream(log, FileMode.Open, FileAccess.Read, FileShare.ReadWrite); using var sr = new StreamReader(fs); string line; string lastLine = ""; while ((line = sr.ReadLine()) != null) { lastLine = line; } if (lastLine.Contains("OnPlayerResting")) _isAfk = true; else if (lastLine.Contains("OnPlayerActive")) _isAfk = false; } catch { } }
         private static string MakeProgressBar(double pos, double len) { if (len <= 0) return ""; int width = 8; int filled = (int)Math.Round((pos / len) * width); filled = Math.Clamp(filled, 0, width); return $"[{new string('■', filled)}{new string('□', width - filled)}] {TimeSpan.FromSeconds(pos):m\\:ss}/{TimeSpan.FromSeconds(len):m\\:ss}"; }
         private static string MakeVisualizer() { StringBuilder sb = new StringBuilder("♪ "); for(int i = 0; i < 14; i++) sb.Append(_visBars[_visRand.Next(0, _visBars.Length)]); return sb.Append(" ♪").ToString(); }
-        private static void StartWindowsMediaScraper() { if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return; try { string script = @"[Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager, Windows.Media, ContentType = WindowsRuntime] | Out-Null $m =[Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync().GetAwaiter().GetResult() while($true) { try { $s = $m.GetCurrentSession() if ($s) { $t = $s.GetTimelineProperties() $i = $s.TryGetMediaPropertiesAsync().GetAwaiter().GetResult() $art = $i.Artist; $tit = $i.Title $name = if ([string]::IsNullOrWhiteSpace($art)) { $tit } else { ""$art - $tit"" } if ([string]::IsNullOrWhiteSpace($name)) { $name = ""Chilling"" } $pos = if ($t) {[math]::Round($t.Position.TotalSeconds) } else { 0 } $end = if ($t) { [math]::Round($t.EndTime.TotalSeconds) } else { 0 }[Console]::WriteLine(""$name|$pos|$end"") } else { [Console]::WriteLine(""Chilling|0|0"") } } catch { [Console]::WriteLine(""Chilling|0|0"") } Start-Sleep -Seconds 1 }"; string b64 = Convert.ToBase64String(Encoding.Unicode.GetBytes(script)); var psi = new ProcessStartInfo("powershell", $"-NoProfile -ExecutionPolicy Bypass -EncodedCommand {b64}") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true }; _psMediaProcess = Process.Start(psi); AppDomain.CurrentDomain.ProcessExit += (s, e) => { try { _psMediaProcess?.Kill(); } catch {} }; Task.Run(() => { if (_psMediaProcess != null) { using var sr = _psMediaProcess.StandardOutput; while (!sr.EndOfStream) { string? line = sr.ReadLine(); if (!string.IsNullOrWhiteSpace(line)) _psMediaData = line; } } }); } catch {} }
-        private static (string Title, double Position, double Length) FetchMusicData() { if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) { if (!string.IsNullOrEmpty(_psMediaData)) { var parts = _psMediaData.Split('|'); if (parts.Length == 3) { double.TryParse(parts[1], out double pos); double.TryParse(parts[2], out double len); return (parts[0], pos, len); } } StringBuilder buff = new StringBuilder(256); IntPtr handle = GetForegroundWindow(); if (GetWindowText(handle, buff, 256) > 0) { string t = buff.ToString(); if (t.Contains("Spotify") || t.Contains("YouTube") || t.Contains("SoundCloud")) return (Regex.Replace(t, @" - (Spotify|YouTube|SoundCloud).*", "").Trim(), 0, 0); } return ("Chilling", 0, 0); } try { var psi = new ProcessStartInfo("playerctl", "metadata --format \"{{artist}} - {{title}}\"") { RedirectStandardOutput = true, UseShellExecute = false }; using var p = Process.Start(psi); string r = p?.StandardOutput.ReadToEnd().Trim() ?? ""; if (!string.IsNullOrEmpty(r) && r != " - ") { double pos = 0, len = 0; try { var psiPos = new ProcessStartInfo("playerctl", "position") { RedirectStandardOutput = true, UseShellExecute = false }; using var pPos = Process.Start(psiPos); double.TryParse(pPos?.StandardOutput.ReadToEnd().Trim(), out pos); var psiLen = new ProcessStartInfo("playerctl", "metadata mpris:length") { RedirectStandardOutput = true, UseShellExecute = false }; using var pLen = Process.Start(psiLen); if (long.TryParse(pLen?.StandardOutput.ReadToEnd().Trim(), out long lMicro)) len = lMicro / 1000000.0; } catch {} return (r, pos, len); } return ("Chilling", 0, 0); } catch { return ("Chilling", 0, 0); } }
+        
+        private static void StartWindowsMediaScraper() { 
+            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return; 
+            try { 
+                string script = @"Add-Type -AssemblyName System.Runtime.WindowsRuntime -ErrorAction SilentlyContinue; [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager, Windows.Media, ContentType = WindowsRuntime] | Out-Null; $req = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync(); $m = [System.WindowsRuntimeSystemExtensions]::GetAwaiter($req).GetResult(); while($true) { try { $s = $m.GetCurrentSession(); if ($s) { $t = $s.GetTimelineProperties(); $propsReq = $s.TryGetMediaPropertiesAsync(); $i = [System.WindowsRuntimeSystemExtensions]::GetAwaiter($propsReq).GetResult(); $art = $i.Artist; $tit = $i.Title; $name = if ([string]::IsNullOrWhiteSpace($art)) { $tit } else { ""$art - $tit"" }; if ([string]::IsNullOrWhiteSpace($name)) { $name = ""Chilling"" } $pos = if ($t) { [math]::Round($t.Position.TotalSeconds) } else { 0 }; $end = if ($t) { [math]::Round($t.EndTime.TotalSeconds) } else { 0 }; [Console]::WriteLine(""$name|$pos|$end""); [Console]::Out.Flush(); } else { [Console]::WriteLine(""Chilling|0|0""); [Console]::Out.Flush(); } } catch { [Console]::WriteLine(""Chilling|0|0""); [Console]::Out.Flush(); } Start-Sleep -Seconds 1; }"; 
+                string b64 = Convert.ToBase64String(Encoding.Unicode.GetBytes(script)); 
+                var psi = new ProcessStartInfo("powershell", $"-NoProfile -ExecutionPolicy Bypass -EncodedCommand {b64}") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true }; 
+                _psMediaProcess = Process.Start(psi); 
+                AppDomain.CurrentDomain.ProcessExit += (s, e) => { try { _psMediaProcess?.Kill(); } catch {} }; 
+                Task.Run(() => { if (_psMediaProcess != null) { using var sr = _psMediaProcess.StandardOutput; while (!sr.EndOfStream) { string? line = sr.ReadLine(); if (!string.IsNullOrWhiteSpace(line)) _psMediaData = line; } } }); 
+            } catch {} 
+        }
+        
+        private static (string Title, double Position, double Length) FetchMusicData() { 
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) { 
+                if (!string.IsNullOrEmpty(_psMediaData) && _psMediaData != "Chilling|0|0") { 
+                    var parts = _psMediaData.Split('|'); 
+                    if (parts.Length == 3) { 
+                        double.TryParse(parts[1], out double pos); 
+                        double.TryParse(parts[2], out double len); 
+                        return (parts[0], pos, len); 
+                    } 
+                } 
+                
+                // Fallback: Actively search for specific application process titles (e.g. Spotify) instead of relying only on the focused window
+                try {
+                    var spotifyProcs = Process.GetProcessesByName("Spotify");
+                    foreach (var p in spotifyProcs) {
+                        string title = p.MainWindowTitle;
+                        if (!string.IsNullOrWhiteSpace(title) && title != "Spotify" && title != "Spotify Premium" && title != "Spotify Free") {
+                            return (title, 0, 0);
+                        }
+                    }
+                } catch { }
+
+                // Final Fallback: currently active foreground window
+                StringBuilder buff = new StringBuilder(256); 
+                IntPtr handle = GetForegroundWindow(); 
+                if (GetWindowText(handle, buff, 256) > 0) { 
+                    string t = buff.ToString(); 
+                    if (t.Contains("YouTube") || t.Contains("SoundCloud") || t.Contains("Spotify")) return (Regex.Replace(t, @" - (Spotify|YouTube|SoundCloud).*", "").Trim(), 0, 0); 
+                } 
+                return ("Chilling", 0, 0); 
+            } 
+            
+            try { var psi = new ProcessStartInfo("playerctl", "metadata --format \"{{artist}} - {{title}}\"") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true }; using var p = Process.Start(psi); string r = p?.StandardOutput.ReadToEnd().Trim() ?? ""; if (!string.IsNullOrEmpty(r) && r != " - ") { double pos = 0, len = 0; try { var psiPos = new ProcessStartInfo("playerctl", "position") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true }; using var pPos = Process.Start(psiPos); double.TryParse(pPos?.StandardOutput.ReadToEnd().Trim(), out pos); var psiLen = new ProcessStartInfo("playerctl", "metadata mpris:length") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true }; using var pLen = Process.Start(psiLen); if (long.TryParse(pLen?.StandardOutput.ReadToEnd().Trim(), out long lMicro)) len = lMicro / 1000000.0; } catch {} return (r, pos, len); } return ("Chilling", 0, 0); } catch { return ("Chilling", 0, 0); } 
+        }
+        
         private static void ScrapeHardwareNames() { string log = Program.FindVrcLog(); if (log != null) try { using var fs = new FileStream(log, FileMode.Open, FileAccess.Read, FileShare.ReadWrite); using var sr = new StreamReader(fs); string line; int linesRead = 0; while ((line = sr.ReadLine()) != null && linesRead < 2000) { linesRead++; if (line.Contains("Processor Type:")) { string raw = line.Substring(line.IndexOf(':') + 1); string cleaned = Regex.Replace(raw, @"(?i)(AMD|Intel(?:\(R\))?|Core(?:\(TM\))?|Ryzen|\d+-Core|Processor|@.*)", ""); _cpu = Regex.Replace(cleaned, @"\s+", " ").Trim(); } else if (line.Contains("Graphics Device Name:")) { string raw = line.Substring(line.IndexOf(':') + 1); string cleaned = Regex.Replace(raw, @"(?i)(NVIDIA|AMD|GeForce|Radeon|Graphics|\(RADV.*?\)|Direct3D.*)", ""); _gpu = Regex.Replace(cleaned, @"\s+", " ").Trim(); } } } catch { } }
         private static string GetDistroName()
         {
