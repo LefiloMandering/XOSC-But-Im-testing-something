@@ -53,7 +53,7 @@ jobs:
           artifacts: ./XOSC.zip
           tag: v${{ steps.get_version.outputs.version }}
           name: v${{ steps.get_version.outputs.version }}
-          prerelease: true
+          prerelease: false
           allowUpdates: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
