@@ -494,8 +494,42 @@ namespace XOSC
     }
     class Program
     {
-        public static string AppVersion => System.Reflection.Assembly.GetExecutingAssembly()
-            .GetName().Version?.ToString() ?? "unknown";
+        public static string AppVersion
+        {
+            get
+            {
+                try
+                {
+                    // Try to get Git hash by running git command
+                    using var process = new Process();
+                    process.StartInfo.FileName = "git";
+                    process.StartInfo.Arguments = "rev-parse --short=7 HEAD";
+                    process.StartInfo.UseShellExecute = false;
+                    process.StartInfo.RedirectStandardOutput = true;
+                    process.StartInfo.CreateNoWindow = true;
+                    process.Start();
+            
+                    string hash = process.StandardOutput.ReadToEnd().Trim();
+                    process.WaitForExit(1000);
+            
+                    if (!string.IsNullOrEmpty(hash) && hash.Length >= 7)
+                        return hash;
+                }
+                catch { }
+        
+                // Fallback to assembly version
+                try
+                {
+                    var version = System.Reflection.Assembly.GetExecutingAssembly()
+                        .GetName().Version?.ToString();
+                    if (!string.IsNullOrEmpty(version) && version != "0.0.0.0")
+                        return version;
+                }
+                catch { }
+        
+                return "unknown";
+            }
+        }
         public static AppConfig Config = new();
         private static string _path = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "xosc", "config.json") : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config", "xosc", "config.json");
         private static string _chatIn = "";
