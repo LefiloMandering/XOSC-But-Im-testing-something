@@ -19,11 +19,6 @@
         <Description>Manage and unfriend VRChat friends</Description>
     </PropertyGroup>
 
-    <!-- Windows: DPI-aware manifest so the exe icon renders properly -->
-    <PropertyGroup Condition="$([MSBuild]::IsOsPlatform('Windows'))">
-        <ApplicationManifest>app.manifest</ApplicationManifest>
-    </PropertyGroup>
-
     <ItemGroup>
         <!-- Cross Platform GUI Libraries -->
         <PackageReference Include="CoreOSC" Version="1.0.0" />
@@ -49,12 +44,12 @@
     </ItemGroup>
 
     <ItemGroup>
-      <Folder Include="publish\linux-x64\" />
-      <Folder Include="publish\win-x64\" />
+        <Folder Include="publish\linux-x64\" />
+        <Folder Include="publish\win-x64\" />
     </ItemGroup>
 
     <ItemGroup>
-      <Content Include=".github\workflows\release.yml" />
+        <Content Include=".github\workflows\release.yml" />
     </ItemGroup>
 
 </Project>
