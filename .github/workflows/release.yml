@@ -51,5 +51,6 @@ jobs:
           name: v${{ steps.get_version.outputs.version }}
           prerelease: false
           allowUpdates: true
+          makeLatest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
