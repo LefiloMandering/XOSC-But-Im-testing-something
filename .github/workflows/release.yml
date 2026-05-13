@@ -4,10 +4,6 @@ on:
   push:
     branches:
       - master
-    paths:
-      - '**.cs'
-      - '**.csproj'
-      - '.github/workflows/release.yml'
 
 jobs:
   build-and-release:
@@ -20,13 +16,13 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0' # Change to your .NET version
+          dotnet-version: '8.0'
 
       - name: Restore dependencies
         run: dotnet restore
 
       - name: Build project
-        run: dotnet publish -c Release -o ./publish
+        run: dotnet publish -c Release -o ./publish XOSC.csproj
 
       - name: Create ZIP archive
         run: |
