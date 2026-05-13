@@ -53,4 +53,8 @@
       <Folder Include="publish\win-x64\" />
     </ItemGroup>
 
+    <ItemGroup>
+      <Content Include=".github\workflows\release.yml" />
+    </ItemGroup>
+
 </Project>
