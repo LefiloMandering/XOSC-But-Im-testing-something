@@ -23,28 +23,24 @@ jobs:
       - name: Restore dependencies
         run: dotnet restore
 
-      - name: Get version from .csproj
+      - name: Get Git commit hash
         id: get_version
         run: |
-          $xml = [xml](Get-Content XOSC.csproj)
-          $version = $xml.Project.PropertyGroup.Version
-          if (-not $version) {
-            $version = $xml.Project.PropertyGroup.AssemblyVersion
-          }
-          if (-not $version) {
-            $version = "1.0.0"
-          }
-          echo "version=$version" >> $env:GITHUB_OUTPUT
-          echo "Found version: $version"
+          $hash = "${{ github.sha }}".Substring(0, 7)
+          echo "version=$hash" >> $env:GITHUB_OUTPUT
+          echo "Found commit hash: $hash"
         shell: powershell
 
-      - name: Build project
-        run: dotnet publish -c Release -o ./publish XOSC.csproj
+      - name: Build for Windows x64
+        run: dotnet publish -c Release -r win-x64 --self-contained true -o ./publish/win-x64 XOSC.csproj
 
-      - name: Create ZIP archive of publish folder
+      - name: Build for Linux x64
+        run: dotnet publish -c Release -r linux-x64 --self-contained true -o ./publish/linux-x64 XOSC.csproj
+
+      - name: Create ZIP archive with both platforms
         run: |
           Compress-Archive -Path ./publish/* -DestinationPath XOSC.zip
-          Write-Host "Created XOSC.zip with contents from ./publish folder"
+          Write-Host "Created XOSC.zip with win-x64 and linux-x64 folders"
         shell: powershell
 
       - name: Create Release
