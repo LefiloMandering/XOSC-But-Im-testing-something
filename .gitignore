@@ -12,7 +12,7 @@ riderModule.iml
 _ReSharper.Caches/
 
 # Custom Scripts and backups
-publish.sh
+publish.cmd
 *.bak
 
 # Manifests (if you want it hidden)
