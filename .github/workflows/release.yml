@@ -1,0 +1,50 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '**.cs'
+      - '**.csproj'
+      - '.github/workflows/release.yml'
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0' # Change to your .NET version
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build project
+        run: dotnet publish -c Release -o ./publish
+
+      - name: Create ZIP archive
+        run: |
+          cd ./publish
+          Compress-Archive -Path * -DestinationPath XOSC.zip
+          cd ..
+
+      - name: Get timestamp
+        id: timestamp
+        run: echo "date=$(Get-Date -Format 'yyyy-MM-dd-HHmm')" >> $env:GITHUB_OUTPUT
+        shell: powershell
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ./publish/XOSC.zip
+          tag_name: release-${{ steps.timestamp.outputs.date }}
+          name: Release ${{ steps.timestamp.outputs.date }}
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
