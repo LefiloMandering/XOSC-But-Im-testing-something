@@ -43,6 +43,5 @@ jobs:
           name: Release ${{ steps.timestamp.outputs.date }}
           prerelease: true
           allowUpdates: true
-          generateReleaseNotes: true
         env:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
