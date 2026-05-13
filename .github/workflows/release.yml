@@ -2,9 +2,8 @@ name: Build and Release
 
 on:
   push:
-    tags:
-      - 'v*'
-      - 'release-*'
+    branches:
+      - master
 
 jobs:
   build-and-release:
@@ -31,10 +30,19 @@ jobs:
           Compress-Archive -Path * -DestinationPath XOSC.zip
           cd ..
 
+      - name: Get timestamp
+        id: timestamp
+        run: echo "date=$(Get-Date -Format 'yyyy-MM-dd-HHmm')" >> $env:GITHUB_OUTPUT
+        shell: powershell
+
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: ncipollo/release-action@v1
         with:
-          files: ./publish/XOSC.zip
-          generate_release_notes: true
+          artifacts: ./publish/XOSC.zip
+          tag: release-${{ steps.timestamp.outputs.date }}
+          name: Release ${{ steps.timestamp.outputs.date }}
+          prerelease: true
+          allowUpdates: true
+          generateReleaseNotes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
