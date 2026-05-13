@@ -8,6 +8,8 @@ on:
 jobs:
   build-and-release:
     runs-on: windows-latest
+    permissions:
+      contents: write   # ✅ Required to create a release
 
     steps:
       - name: Checkout code
@@ -16,7 +18,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0'
+          dotnet-version: '9.0'   # ✅ Updated to 9.0
 
       - name: Restore dependencies
         run: dotnet restore
@@ -44,4 +46,4 @@ jobs:
           prerelease: true
           allowUpdates: true
         env:
-          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # ✅ Built-in token with write permissions
