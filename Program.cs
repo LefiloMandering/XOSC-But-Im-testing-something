@@ -257,10 +257,24 @@ namespace XOSC
         using var ms = new MemoryStream(z); 
         using var arch = new ZipArchive(ms); 
         
-        // Platform-specific binary path
-        string binaryPath = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) 
-            ? "win-x64/XOSC.exe" 
-            : "linux-x64/XOSC";  // No .exe extension on Linux
+        // ✅ ADDED: Platform detection
+        bool isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+        bool isLinux = RuntimeInformation.IsOSPlatform(OSPlatform.Linux);
+        
+        string binaryPath;
+        if (isWindows)
+        {
+            binaryPath = "win-x64/XOSC.exe";
+        }
+        else if (isLinux)
+        {
+            binaryPath = "linux-x64/XOSC";
+        }
+        else
+        {
+            Status = "Unsupported operating system";
+            return;
+        }
         
         Status = $"Looking for: {binaryPath}";
         
@@ -268,7 +282,6 @@ namespace XOSC
         
         if (entry == null) 
         { 
-            // Debug: List what's actually in the ZIP
             var entries = arch.Entries.Select(e => e.FullName).Take(10).ToList();
             Status = $"binary not found at '{binaryPath}'. ZIP contains: {string.Join(", ", entries)}"; 
             return; 
