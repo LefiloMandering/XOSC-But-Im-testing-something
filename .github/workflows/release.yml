@@ -31,16 +31,28 @@ jobs:
           echo "Found commit hash: $hash"
         shell: powershell
 
-      - name: Build for Windows x64
-        run: dotnet publish -c Release -r win-x64 --self-contained true -o ./publish/win-x64 XOSC.csproj
+      - name: Build single-file for Windows x64
+        run: |
+          dotnet publish -c Release -r win-x64 --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:DebugType=none `
+            -p:EnableCompressionInSingleFile=true `
+            -o ./publish/win-x64 XOSC.csproj
+        shell: powershell
 
-      - name: Build for Linux x64
-        run: dotnet publish -c Release -r linux-x64 --self-contained true -o ./publish/linux-x64 XOSC.csproj
+      - name: Build single-file for Linux x64
+        run: |
+          dotnet publish -c Release -r linux-x64 --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:DebugType=none `
+            -p:EnableCompressionInSingleFile=true `
+            -o ./publish/linux-x64 XOSC.csproj
+        shell: powershell
 
       - name: Create ZIP archive with both platforms
         run: |
           Compress-Archive -Path ./publish/* -DestinationPath XOSC.zip
-          Write-Host "Created XOSC.zip with win-x64 and linux-x64 folders"
+          Write-Host "Created XOSC.zip with single-file executables"
         shell: powershell
 
       - name: Create Release
