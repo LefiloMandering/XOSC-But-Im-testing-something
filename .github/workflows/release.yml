@@ -38,10 +38,7 @@ jobs:
             -p:PublishSingleFile=true `
             -p:DebugType=none `
             -p:EnableCompressionInSingleFile=true `
-            -p:Version=$hash `
-            -p:FileVersion=$hash `
             -p:InformationalVersion=$hash `
-            -p:AssemblyVersion=$hash `
             -o ./publish/win-x64 XOSC.csproj
         shell: powershell
 
@@ -52,10 +49,7 @@ jobs:
             -p:PublishSingleFile=true `
             -p:DebugType=none `
             -p:EnableCompressionInSingleFile=true `
-            -p:Version=$hash `
-            -p:FileVersion=$hash `
             -p:InformationalVersion=$hash `
-            -p:AssemblyVersion=$hash `
             -o ./publish/linux-x64 XOSC.csproj
         shell: powershell
 

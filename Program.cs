@@ -627,27 +627,20 @@ namespace XOSC
         {
             get
             {
-                // Read the version embedded at build time
+                // Read the Git hash from InformationalVersion (set at build time)
                 var assembly = System.Reflection.Assembly.GetExecutingAssembly();
-        
-                // Try InformationalVersion first (set by -p:InformationalVersion)
                 var informationalVersion = assembly.GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>();
+        
                 if (informationalVersion != null && !string.IsNullOrEmpty(informationalVersion.InformationalVersion))
                 {
                     string version = informationalVersion.InformationalVersion;
                     // Return first 7 chars if it's longer (should be exactly 7 from our workflow)
-                    return version.Length >= 7 ? version.Substring(0, 7) : version;
+                    if (version.Length >= 7)
+                        return version.Substring(0, 7);
+                    return version;
                 }
         
-                // Fallback to FileVersion
-                var fileVersion = System.Diagnostics.FileVersionInfo.GetVersionInfo(assembly.Location);
-                if (!string.IsNullOrEmpty(fileVersion.FileVersion) && fileVersion.FileVersion != "1.0.0.0")
-                {
-                    string version = fileVersion.FileVersion;
-                    return version.Length >= 7 ? version.Substring(0, 7) : version;
-                }
-        
-                // Ultimate fallback - try to get Git hash at runtime (development only)
+                // Fallback for development - try to get Git hash at runtime
                 try
                 {
                     using var process = new Process();
