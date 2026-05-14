@@ -256,33 +256,39 @@ namespace XOSC
                 var z = await http.GetByteArrayAsync(dUrl); 
                 using var ms = new MemoryStream(z); 
                 using var arch = new ZipArchive(ms); 
-                
+        
+                // Platform detection
                 bool isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
                 bool isLinux = RuntimeInformation.IsOSPlatform(OSPlatform.Linux);
         
-                string binaryPath;
-                if (isWindows)
-                {
-                    binaryPath = "win-x64/XOSC.exe";
-                }
-                else if (isLinux)
-                {
-                    binaryPath = "linux-x64/XOSC";
-                }
-                else
-                {
-                    Status = "Unsupported operating system";
-                    return;
-                }
+                string targetFolder = isWindows ? "win-x64" : "linux-x64";
         
-                Status = $"Looking for: {binaryPath}";
+                // ✅ FIX: Find ANY entry in the target folder that looks like an executable
+                var entries = arch.Entries
+                    .Where(e => e.FullName.StartsWith(targetFolder, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
         
-                var entry = arch.GetEntry(binaryPath);
+                // Look for common executable names (case-insensitive)
+                string[] possibleNames = isWindows 
+                    ? new[] { "xosc.exe", "XOSC.exe", "xosc", "XOSC" }
+                    : new[] { "xosc", "XOSC", "xosc.exe", "XOSC.exe" };
+        
+                ZipArchiveEntry? entry = null;
+                foreach (var name in possibleNames)
+                {
+                    entry = entries.FirstOrDefault(e => 
+                        Path.GetFileName(e.FullName).Equals(name, StringComparison.OrdinalIgnoreCase));
+                    if (entry != null)
+                    {
+                        Status = $"Found binary: {entry.FullName}";
+                        break;
+                    }
+                }
         
                 if (entry == null) 
                 { 
-                    var entries = arch.Entries.Select(e => e.FullName).Take(10).ToList();
-                    Status = $"binary not found at '{binaryPath}'. ZIP contains: {string.Join(", ", entries)}"; 
+                    var fileList = entries.Select(e => Path.GetFileName(e.FullName)).Take(10).ToList();
+                    Status = $"No executable found in '{targetFolder}'. Files: {string.Join(", ", fileList)}"; 
                     return; 
                 } 
         

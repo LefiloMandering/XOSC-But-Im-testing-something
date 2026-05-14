@@ -50,6 +50,8 @@ jobs:
             -p:DebugType=none `
             -p:EnableCompressionInSingleFile=true `
             -p:InformationalVersion=$hash `
+            -p:AssemblyTitle=XOSC `
+            -p:AssemblyName=XOSC `
             -o ./publish/linux-x64 XOSC.csproj
         shell: powershell
 
