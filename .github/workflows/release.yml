@@ -33,19 +33,29 @@ jobs:
 
       - name: Build single-file for Windows x64
         run: |
+          $hash = "${{ steps.get_version.outputs.version }}"
           dotnet publish -c Release -r win-x64 --self-contained true `
             -p:PublishSingleFile=true `
             -p:DebugType=none `
             -p:EnableCompressionInSingleFile=true `
+            -p:Version=$hash `
+            -p:FileVersion=$hash `
+            -p:InformationalVersion=$hash `
+            -p:AssemblyVersion=$hash `
             -o ./publish/win-x64 XOSC.csproj
         shell: powershell
 
       - name: Build single-file for Linux x64
         run: |
+          $hash = "${{ steps.get_version.outputs.version }}"
           dotnet publish -c Release -r linux-x64 --self-contained true `
             -p:PublishSingleFile=true `
             -p:DebugType=none `
             -p:EnableCompressionInSingleFile=true `
+            -p:Version=$hash `
+            -p:FileVersion=$hash `
+            -p:InformationalVersion=$hash `
+            -p:AssemblyVersion=$hash `
             -o ./publish/linux-x64 XOSC.csproj
         shell: powershell
 

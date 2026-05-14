@@ -15,6 +15,7 @@ using System.Net.Http;
 using System.Net.NetworkInformation;
 using System.Text.RegularExpressions;
 using System.Numerics;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using Raylib_cs;
 using ImGuiNET;
@@ -215,89 +216,99 @@ namespace XOSC
     }
 
     public static class Updater 
-
     { 
-
         public static string Status = "idle"; 
         public static bool NewVersionFound = false; 
         private static byte[]? _pData; 
         private const string StableApiUrl = "https://api.github.com/repos/hollyntt/XOSC/releases/latest"; 
-    
-    
+        
         public static async Task CheckForUpdates() 
+{ 
+    Status = "checking GitHub..."; 
+    NewVersionFound = false; 
+    try 
+    { 
+        using var http = new HttpClient(); 
+        http.DefaultRequestHeaders.Add("User-Agent", "XOSC-Updater"); 
+        var r = await http.GetStringAsync(StableApiUrl); 
+        using var doc = JsonDocument.Parse(r); 
+        string tag = doc.RootElement.GetProperty("tag_name").GetString() ?? ""; 
+        
+        // Compare versions (strip 'v' prefix)
+        string currentVersion = Program.AppVersion;
+        string latestVersion = tag.TrimStart('v');
+        
+        if (tag == $"v{currentVersion}" || latestVersion == currentVersion)
         { 
-            Status = "checking GitHub..."; 
-            NewVersionFound = false; 
-            try 
-            { 
-                using var http = new HttpClient(); 
-                http.DefaultRequestHeaders.Add("User-Agent", "XOSC-Updater"); 
-                var r = await http.GetStringAsync(StableApiUrl); 
-                using var doc = JsonDocument.Parse(r); 
-                string tag = doc.RootElement.GetProperty("tag_name").GetString() ?? ""; 
-            
-                // Remove 'v' prefix if present for comparison
-                string currentVersion = Program.AppVersion;
-                string latestVersion = tag.TrimStart('v');
-            
-                if (tag == $"v{currentVersion}" || latestVersion == currentVersion)
-                { 
-                    Status = "already up to date"; 
-                    return; 
-                } 
-            
-                // Find the XOSC.zip asset
-                var asset = doc.RootElement.GetProperty("assets")
-                    .EnumerateArray()
-                    .FirstOrDefault(a => a.GetProperty("name").GetString() == "XOSC.zip"); 
-            
-                if (asset.ValueKind == JsonValueKind.Undefined)
-                {
-                    Status = "zip asset not found in release";
-                    return;
-                }
-            
-                string dUrl = asset.GetProperty("browser_download_url").GetString() ?? ""; 
-                if (string.IsNullOrEmpty(dUrl))
-                {
-                    Status = "download URL not found";
-                    return;
-                }
-            
-                var z = await http.GetByteArrayAsync(dUrl); 
-                using var ms = new MemoryStream(z); 
-                using var arch = new ZipArchive(ms); 
-            
-                // Determine which platform binary to extract
-                string platformPath = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) 
-                    ? "win-x64/XOSC.exe" 
-                    : "linux-x64/XOSC";
-            
-                var entry = arch.GetEntry(platformPath);
-            
-                if (entry == null) 
-                { 
-                    Status = $"binary not found in zip at path: {platformPath}"; 
-                    return; 
-                } 
-            
-                Status = $"update found! (v{latestVersion})"; 
-                NewVersionFound = true; 
-            
-                using var es = entry.Open(); 
-                using var msw = new MemoryStream(); 
-                await es.CopyToAsync(msw); 
-                _pData = msw.ToArray(); 
-            } 
-            catch (HttpRequestException e) when (e.StatusCode == System.Net.HttpStatusCode.NotFound)
-            {
-                Status = "no releases found on GitHub yet";
-            }
-            catch (Exception e) 
-            { 
-                Status = $"error: {e.Message}"; 
-            } 
+            Status = "already up to date"; 
+            return; 
         } 
+        
+        // Find the XOSC.zip asset
+        var asset = doc.RootElement.GetProperty("assets")
+            .EnumerateArray()
+            .FirstOrDefault(a => a.GetProperty("name").GetString() == "XOSC.zip"); 
+        
+        if (asset.ValueKind == JsonValueKind.Undefined)
+        {
+            Status = "zip asset not found in release";
+            return;
+        }
+        
+        string dUrl = asset.GetProperty("browser_download_url").GetString() ?? ""; 
+        var z = await http.GetByteArrayAsync(dUrl); 
+        using var ms = new MemoryStream(z); 
+        using var arch = new ZipArchive(ms); 
+        
+        // Try multiple possible paths for the binary
+        string[] possiblePaths = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) 
+            ? new[] { 
+                "win-x64/XOSC.exe",      // Expected path
+                "XOSC.exe",               // Root level
+                "publish/win-x64/XOSC.exe" // Alternative
+              }
+            : new[] { 
+                "linux-x64/XOSC",         // Expected path  
+                "XOSC",                   // Root level
+                "publish/linux-x64/XOSC"  // Alternative
+              };
+        
+        ZipArchiveEntry? entry = null;
+        foreach (var path in possiblePaths)
+        {
+            entry = arch.GetEntry(path);
+            if (entry != null)
+            {
+                Status = $"found binary at: {path}";
+                break;
+            }
+        }
+        
+        if (entry == null) 
+        { 
+            // Debug: List what's actually in the ZIP
+            var entries = arch.Entries.Select(e => e.FullName).ToList();
+            Status = $"binary not found. ZIP contains: {string.Join(", ", entries.Take(5))}..."; 
+            return; 
+        } 
+        
+        Status = $"update found! (v{latestVersion})"; 
+        NewVersionFound = true; 
+        
+        using var es = entry.Open(); 
+        using var msw = new MemoryStream(); 
+        await es.CopyToAsync(msw); 
+        _pData = msw.ToArray(); 
+    } 
+    catch (HttpRequestException e) when (e.StatusCode == System.Net.HttpStatusCode.NotFound)
+    {
+        Status = "no releases found on GitHub yet";
+    }
+    catch (Exception e) 
+    { 
+        Status = $"error: {e.Message}"; 
+    } 
+}
         
         public static void ApplyUpdate() 
         { 
@@ -616,9 +627,29 @@ namespace XOSC
         {
             get
             {
+                // Read the version embedded at build time
+                var assembly = System.Reflection.Assembly.GetExecutingAssembly();
+        
+                // Try InformationalVersion first (set by -p:InformationalVersion)
+                var informationalVersion = assembly.GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>();
+                if (informationalVersion != null && !string.IsNullOrEmpty(informationalVersion.InformationalVersion))
+                {
+                    string version = informationalVersion.InformationalVersion;
+                    // Return first 7 chars if it's longer (should be exactly 7 from our workflow)
+                    return version.Length >= 7 ? version.Substring(0, 7) : version;
+                }
+        
+                // Fallback to FileVersion
+                var fileVersion = System.Diagnostics.FileVersionInfo.GetVersionInfo(assembly.Location);
+                if (!string.IsNullOrEmpty(fileVersion.FileVersion) && fileVersion.FileVersion != "1.0.0.0")
+                {
+                    string version = fileVersion.FileVersion;
+                    return version.Length >= 7 ? version.Substring(0, 7) : version;
+                }
+        
+                // Ultimate fallback - try to get Git hash at runtime (development only)
                 try
                 {
-                    // Try to get Git hash by running git command
                     using var process = new Process();
                     process.StartInfo.FileName = "git";
                     process.StartInfo.Arguments = "rev-parse --short=7 HEAD";
@@ -635,19 +666,10 @@ namespace XOSC
                 }
                 catch { }
         
-                // Fallback to assembly version
-                try
-                {
-                    var version = System.Reflection.Assembly.GetExecutingAssembly()
-                        .GetName().Version?.ToString();
-                    if (!string.IsNullOrEmpty(version) && version != "0.0.0.0")
-                        return version;
-                }
-                catch { }
-        
                 return "unknown";
             }
         }
+        
         public static AppConfig Config = new();
         private static string _path = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "xosc", "config.json") : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config", "xosc", "config.json");
         private static string _chatIn = "";
