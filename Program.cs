@@ -220,86 +220,85 @@ namespace XOSC
         public static string Status = "idle"; 
         public static bool NewVersionFound = false; 
         private static byte[]? _pData; 
-        private const string StableApiUrl = "https://api.github.com/repos/hollyntt/XOSC/releases/latest"; 
+        private const string StableApiUrl = "https://api.github.com/repos/hollyntt/XOSC/releases/latest";
         
         public static async Task CheckForUpdates() 
-{ 
-    Status = "checking GitHub..."; 
-    NewVersionFound = false; 
-    try 
-    { 
-        using var http = new HttpClient(); 
-        http.DefaultRequestHeaders.Add("User-Agent", "XOSC-Updater"); 
-        var r = await http.GetStringAsync(StableApiUrl); 
-        using var doc = JsonDocument.Parse(r); 
-        string tag = doc.RootElement.GetProperty("tag_name").GetString() ?? ""; 
-        string latestVersion = tag.TrimStart('v'); 
-        string currentVersion = Program.AppVersion; 
-        
-        if (latestVersion == currentVersion)
         { 
-            Status = "already up to date"; 
-            return; 
-        } 
+            Status = "checking GitHub..."; 
+            NewVersionFound = false; 
+            try 
+            { 
+                using var http = new HttpClient(); 
+                http.DefaultRequestHeaders.Add("User-Agent", "XOSC-Updater"); 
+                var r = await http.GetStringAsync(StableApiUrl); 
+                using var doc = JsonDocument.Parse(r); 
+                string tag = doc.RootElement.GetProperty("tag_name").GetString() ?? ""; 
+                string latestVersion = tag.TrimStart('v'); 
+                string currentVersion = Program.AppVersion; 
         
-        var asset = doc.RootElement.GetProperty("assets")
-            .EnumerateArray()
-            .FirstOrDefault(a => a.GetProperty("name").GetString() == "XOSC.zip"); 
+                if (latestVersion == currentVersion)
+                { 
+                    Status = "already up to date"; 
+                    return; 
+                } 
         
-        if (asset.ValueKind == JsonValueKind.Undefined)
-        {
-            Status = "XOSC.zip not found in release";
-            return;
+                var asset = doc.RootElement.GetProperty("assets")
+                    .EnumerateArray()
+                    .FirstOrDefault(a => a.GetProperty("name").GetString() == "XOSC.zip"); 
+        
+                if (asset.ValueKind == JsonValueKind.Undefined)
+                {
+                    Status = "XOSC.zip not found in release";
+                    return;
+                }
+        
+                string dUrl = asset.GetProperty("browser_download_url").GetString() ?? ""; 
+                var z = await http.GetByteArrayAsync(dUrl); 
+                using var ms = new MemoryStream(z); 
+                using var arch = new ZipArchive(ms); 
+                
+                bool isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+                bool isLinux = RuntimeInformation.IsOSPlatform(OSPlatform.Linux);
+        
+                string binaryPath;
+                if (isWindows)
+                {
+                    binaryPath = "win-x64/XOSC.exe";
+                }
+                else if (isLinux)
+                {
+                    binaryPath = "linux-x64/XOSC";
+                }
+                else
+                {
+                    Status = "Unsupported operating system";
+                    return;
+                }
+        
+                Status = $"Looking for: {binaryPath}";
+        
+                var entry = arch.GetEntry(binaryPath);
+        
+                if (entry == null) 
+                { 
+                    var entries = arch.Entries.Select(e => e.FullName).Take(10).ToList();
+                    Status = $"binary not found at '{binaryPath}'. ZIP contains: {string.Join(", ", entries)}"; 
+                    return; 
+                } 
+        
+                Status = $"Update found! (v{latestVersion})"; 
+                NewVersionFound = true; 
+        
+                using var es = entry.Open(); 
+                using var msw = new MemoryStream(); 
+                await es.CopyToAsync(msw); 
+                _pData = msw.ToArray(); 
+            } 
+            catch (Exception e) 
+            { 
+                Status = $"error: {e.Message}"; 
+            } 
         }
-        
-        string dUrl = asset.GetProperty("browser_download_url").GetString() ?? ""; 
-        var z = await http.GetByteArrayAsync(dUrl); 
-        using var ms = new MemoryStream(z); 
-        using var arch = new ZipArchive(ms); 
-        
-        // ✅ ADDED: Platform detection
-        bool isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
-        bool isLinux = RuntimeInformation.IsOSPlatform(OSPlatform.Linux);
-        
-        string binaryPath;
-        if (isWindows)
-        {
-            binaryPath = "win-x64/XOSC.exe";
-        }
-        else if (isLinux)
-        {
-            binaryPath = "linux-x64/XOSC";
-        }
-        else
-        {
-            Status = "Unsupported operating system";
-            return;
-        }
-        
-        Status = $"Looking for: {binaryPath}";
-        
-        var entry = arch.GetEntry(binaryPath);
-        
-        if (entry == null) 
-        { 
-            var entries = arch.Entries.Select(e => e.FullName).Take(10).ToList();
-            Status = $"binary not found at '{binaryPath}'. ZIP contains: {string.Join(", ", entries)}"; 
-            return; 
-        } 
-        
-        Status = $"Update found! (v{latestVersion})"; 
-        NewVersionFound = true; 
-        
-        using var es = entry.Open(); 
-        using var msw = new MemoryStream(); 
-        await es.CopyToAsync(msw); 
-        _pData = msw.ToArray(); 
-    } 
-    catch (Exception e) 
-    { 
-        Status = $"error: {e.Message}"; 
-    } 
-}
         
         public static void ApplyUpdate() 
         { 
