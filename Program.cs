@@ -233,25 +233,22 @@ namespace XOSC
         var r = await http.GetStringAsync(StableApiUrl); 
         using var doc = JsonDocument.Parse(r); 
         string tag = doc.RootElement.GetProperty("tag_name").GetString() ?? ""; 
+        string latestVersion = tag.TrimStart('v'); 
+        string currentVersion = Program.AppVersion; 
         
-        // Compare versions (strip 'v' prefix)
-        string currentVersion = Program.AppVersion;
-        string latestVersion = tag.TrimStart('v');
-        
-        if (tag == $"v{currentVersion}" || latestVersion == currentVersion)
+        if (latestVersion == currentVersion)
         { 
             Status = "already up to date"; 
             return; 
         } 
         
-        // Find the XOSC.zip asset
         var asset = doc.RootElement.GetProperty("assets")
             .EnumerateArray()
             .FirstOrDefault(a => a.GetProperty("name").GetString() == "XOSC.zip"); 
         
         if (asset.ValueKind == JsonValueKind.Undefined)
         {
-            Status = "zip asset not found in release";
+            Status = "XOSC.zip not found in release";
             return;
         }
         
@@ -260,39 +257,24 @@ namespace XOSC
         using var ms = new MemoryStream(z); 
         using var arch = new ZipArchive(ms); 
         
-        // Try multiple possible paths for the binary
-        string[] possiblePaths = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) 
-            ? new[] { 
-                "win-x64/XOSC.exe",      // Expected path
-                "XOSC.exe",               // Root level
-                "publish/win-x64/XOSC.exe" // Alternative
-              }
-            : new[] { 
-                "linux-x64/XOSC",         // Expected path  
-                "XOSC",                   // Root level
-                "publish/linux-x64/XOSC"  // Alternative
-              };
+        // Platform-specific binary path
+        string binaryPath = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) 
+            ? "win-x64/XOSC.exe" 
+            : "linux-x64/XOSC";  // No .exe extension on Linux
         
-        ZipArchiveEntry? entry = null;
-        foreach (var path in possiblePaths)
-        {
-            entry = arch.GetEntry(path);
-            if (entry != null)
-            {
-                Status = $"found binary at: {path}";
-                break;
-            }
-        }
+        Status = $"Looking for: {binaryPath}";
+        
+        var entry = arch.GetEntry(binaryPath);
         
         if (entry == null) 
         { 
             // Debug: List what's actually in the ZIP
-            var entries = arch.Entries.Select(e => e.FullName).ToList();
-            Status = $"binary not found. ZIP contains: {string.Join(", ", entries.Take(5))}..."; 
+            var entries = arch.Entries.Select(e => e.FullName).Take(10).ToList();
+            Status = $"binary not found at '{binaryPath}'. ZIP contains: {string.Join(", ", entries)}"; 
             return; 
         } 
         
-        Status = $"update found! (v{latestVersion})"; 
+        Status = $"Update found! (v{latestVersion})"; 
         NewVersionFound = true; 
         
         using var es = entry.Open(); 
@@ -300,10 +282,6 @@ namespace XOSC
         await es.CopyToAsync(msw); 
         _pData = msw.ToArray(); 
     } 
-    catch (HttpRequestException e) when (e.StatusCode == System.Net.HttpStatusCode.NotFound)
-    {
-        Status = "no releases found on GitHub yet";
-    }
     catch (Exception e) 
     { 
         Status = $"error: {e.Message}"; 
