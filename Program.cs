@@ -214,8 +214,126 @@ namespace XOSC
         }
     }
 
-    public static class Updater { public static string Status = "idle"; public static bool NewVersionFound = false; private static byte[]? _pData; private const string StableApiUrl = "https://api.github.com/repos/hollyntt/XOSC/releases/latest"; public static async Task CheckForUpdates() { Status = "checking GitHub..."; NewVersionFound = false; try { using var http = new HttpClient(); http.DefaultRequestHeaders.Add("User-Agent", "XOSC-Updater"); var r = await http.GetStringAsync(StableApiUrl); using var doc = JsonDocument.Parse(r); string tag = doc.RootElement.GetProperty("tag_name").GetString() ?? ""; if (tag == Program.AppVersion) { Status = "already up to date"; return; } var asset = doc.RootElement.GetProperty("assets").EnumerateArray().FirstOrDefault(a => a.GetProperty("name").GetString() == "XOSC.zip"); string dUrl = asset.GetProperty("browser_download_url").GetString() ?? ""; var z = await http.GetByteArrayAsync(dUrl); using var ms = new MemoryStream(z); using var arch = new ZipArchive(ms); var entry = arch.GetEntry("linux-x64/XOSC") ?? arch.GetEntry("XOSC"); if (entry == null) { Status = "binary not found in zip"; return; } Status = "update found!"; NewVersionFound = true; using var es = entry.Open(); using var msw = new MemoryStream(); await es.CopyToAsync(msw); _pData = msw.ToArray(); } catch (Exception e) { Status = $"error: {e.Message}"; } } public static void ApplyUpdate() { if (_pData == null) return; try { string self = Environment.ProcessPath!; Program.SaveConfig(); File.Move(self, self + ".bak", true); File.WriteAllBytes(self, _pData); if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux)) Process.Start("chmod", $"+x \"{self}\"").WaitForExit(); Thread.Sleep(500); Process.Start(new ProcessStartInfo(self) { UseShellExecute = true }); Environment.Exit(0); } catch (Exception e) { Status = $"apply error: {e.Message}"; } } }
+    public static class Updater 
 
+    { 
+
+        public static string Status = "idle"; 
+        public static bool NewVersionFound = false; 
+        private static byte[]? _pData; 
+        private const string StableApiUrl = "https://api.github.com/repos/hollyntt/XOSC/releases/latest"; 
+    
+    
+        public static async Task CheckForUpdates() 
+        { 
+            Status = "checking GitHub..."; 
+            NewVersionFound = false; 
+            try 
+            { 
+                using var http = new HttpClient(); 
+                http.DefaultRequestHeaders.Add("User-Agent", "XOSC-Updater"); 
+                var r = await http.GetStringAsync(StableApiUrl); 
+                using var doc = JsonDocument.Parse(r); 
+                string tag = doc.RootElement.GetProperty("tag_name").GetString() ?? ""; 
+            
+                // Remove 'v' prefix if present for comparison
+                string currentVersion = Program.AppVersion;
+                string latestVersion = tag.TrimStart('v');
+            
+                if (tag == $"v{currentVersion}" || latestVersion == currentVersion)
+                { 
+                    Status = "already up to date"; 
+                    return; 
+                } 
+            
+                // Find the XOSC.zip asset
+                var asset = doc.RootElement.GetProperty("assets")
+                    .EnumerateArray()
+                    .FirstOrDefault(a => a.GetProperty("name").GetString() == "XOSC.zip"); 
+            
+                if (asset.ValueKind == JsonValueKind.Undefined)
+                {
+                    Status = "zip asset not found in release";
+                    return;
+                }
+            
+                string dUrl = asset.GetProperty("browser_download_url").GetString() ?? ""; 
+                if (string.IsNullOrEmpty(dUrl))
+                {
+                    Status = "download URL not found";
+                    return;
+                }
+            
+                var z = await http.GetByteArrayAsync(dUrl); 
+                using var ms = new MemoryStream(z); 
+                using var arch = new ZipArchive(ms); 
+            
+                // Determine which platform binary to extract
+                string platformPath = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) 
+                    ? "win-x64/XOSC.exe" 
+                    : "linux-x64/XOSC";
+            
+                var entry = arch.GetEntry(platformPath);
+            
+                if (entry == null) 
+                { 
+                    Status = $"binary not found in zip at path: {platformPath}"; 
+                    return; 
+                } 
+            
+                Status = $"update found! (v{latestVersion})"; 
+                NewVersionFound = true; 
+            
+                using var es = entry.Open(); 
+                using var msw = new MemoryStream(); 
+                await es.CopyToAsync(msw); 
+                _pData = msw.ToArray(); 
+            } 
+            catch (HttpRequestException e) when (e.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                Status = "no releases found on GitHub yet";
+            }
+            catch (Exception e) 
+            { 
+                Status = $"error: {e.Message}"; 
+            } 
+        } 
+        
+        public static void ApplyUpdate() 
+        { 
+        
+            if (_pData == null) return; 
+            try 
+            { 
+                string self = Environment.ProcessPath!; 
+                Program.SaveConfig(); 
+            
+                // Create backup
+                string backupPath = self + ".bak";
+                if (File.Exists(backupPath))
+                    File.Delete(backupPath);
+                File.Move(self, backupPath, true); 
+            
+                // Write new binary
+                File.WriteAllBytes(self, _pData); 
+            
+                // Restore executable permission on Linux
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux)) 
+                    Process.Start("chmod", $"+x \"{self}\"").WaitForExit(); 
+            
+                Thread.Sleep(500); 
+            
+                // Restart the app
+                Process.Start(new ProcessStartInfo(self) { UseShellExecute = true }); 
+                Environment.Exit(0); 
+            } 
+            catch (Exception e) 
+            { 
+                Status = $"apply error: {e.Message}"; 
+            } 
+        } 
+    }
+    
     public static class NetworkStats
     {
         private static readonly Queue<double> _latencies = new();
