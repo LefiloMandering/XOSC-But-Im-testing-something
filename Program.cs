@@ -122,6 +122,10 @@ namespace XOSC
         
         [DllImport("kernel32.dll", SetLastError = true)]
         public static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
+        [DllImport("kernel32.dll")]
+        public static extern bool FreeConsole();
+        [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+        public static unsafe void RaylibLogCallback(int logLevel, sbyte* text, sbyte* args) { }
     }
 
     public static class HardwareService
@@ -675,6 +679,18 @@ namespace XOSC
         static Vector4 V4(float[] c) => new(c[0], c[1], c[2], 1f);
 
         public static void Main() { 
+#if DEBUG
+            unsafe
+            {
+                Raylib.SetTraceLogCallback(&NativeMethods.RaylibLogCallback);
+            }
+            Raylib.SetTraceLogLevel(TraceLogLevel.None);
+            Console.SetOut(TextWriter.Null);
+            Console.SetError(TextWriter.Null);
+            
+            NativeMethods.FreeConsole();
+#endif
+            
             LoadConfig(); 
             ColAccent = V4(Config.AccentColor); ColBg = V4(Config.BgColor); ColSidebar = V4(Config.SidebarColor); ColCard = V4(Config.CardColor); ColText = DeriveText(V4(Config.BgColor)); ColSubText = DeriveSubText(V4(Config.BgColor)); 
             _mtx = new Mutex(true, "XOSC_VRC_Unique_Runner", out bool fresh); 
@@ -683,6 +699,20 @@ namespace XOSC
             if (Config.SavedVersion != AppVersion) { Config.SavedVersion = AppVersion; SaveConfig(); } 
             MusicChatEngine.Init(); 
             Raylib.InitWindow(960, 640, "XOSC"); 
+            try
+            {
+                string iconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "icon.png");
+                if (!File.Exists(iconPath))
+                    iconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "icon.ico");
+
+                if (File.Exists(iconPath))
+                {
+                    Image iconImage = Raylib.LoadImage(iconPath);
+                    Raylib.SetWindowIcon(iconImage);
+                    Raylib.UnloadImage(iconImage);
+                }
+            }
+            catch { }
             Raylib.SetWindowState(ConfigFlags.ResizableWindow); 
             rlImGui.Setup(true); 
             Raylib.SetTargetFPS(60); 
