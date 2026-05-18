@@ -21,6 +21,7 @@
     <ItemGroup>
         <!-- Cross Platform GUI Libraries -->
         <PackageReference Include="CoreOSC" Version="1.0.0" />
+        <PackageReference Include="LibreHardwareMonitorLib" Version="0.9.6" />
         <PackageReference Include="Raylib-cs" Version="7.0.2" />
         <PackageReference Include="rlImgui-cs" Version="3.2.0" />
         <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
