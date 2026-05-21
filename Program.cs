@@ -239,29 +239,70 @@ namespace XOSC
 
             if (_gpu != null)
             {
-                GpuLoad = GetHighestSensorValue(_gpu, SensorType.Load, new[] { "3D", "Core" }, "--%", v => $"{v:F0}%", strict: true);
-                GpuTemp = GetHighestSensorValue(_gpu, SensorType.Temperature, new[] { "GPU Core", "Core" }, "--°C", v => $"{v:F0}°C", strict: false);
-                GpuHotspot = GetHighestSensorValue(_gpu, SensorType.Temperature, new[] { "Hot spot", "Hotspot" }, "--°C", v => $"{v:F0}°C", strict: true);
-                GpuPower = GetHighestSensorValue(_gpu, SensorType.Power, new[] { "GPU Power", "Package", "Total Board", "PPT" }, "--W", v => $"{v:F0}W", strict: false);
+                GpuLoad = GetHighestSensorValue(_gpu, SensorType.Load, new[] { "3D", "Core" }, "--% ", v => $"{v:F0}%", strict: true);
+                GpuTemp = GetHighestSensorValue(_gpu, SensorType.Temperature, new[] { "GPU Core", "Core" }, "--°C ", v => $"{v:F0}°C", strict: false);
+                GpuHotspot = GetHighestSensorValue(_gpu, SensorType.Temperature, new[] { "Hot spot", "Hotspot" }, "--°C ", v => $"{v:F0}°C", strict: true);
+                GpuPower = GetHighestSensorValue(_gpu, SensorType.Power, new[] { "GPU Power", "Package", "Total Board", "PPT" }, "--W ", v => $"{v:F0}W", strict: false);
 
-                float? vramUsed = GetHighestVramFloat(_gpu, new[] { "Memory Used", "Dedicated Memory Used" });
-                float? vramTotal = GetHighestVramFloat(_gpu, new[] { "Memory Total", "Dedicated Memory Total" });
+                // ✅ FIX: Prioritize Dedicated VRAM sensors to ignore Shared Memory bleed-through
+                float? vramUsed = GetVramSensorValue(_gpu, new[] { "Dedicated Memory Used", "Memory Used" });
+                float? vramTotal = GetVramSensorValue(_gpu, new[] { "Dedicated Memory Total", "Memory Total" });
+
                 if (vramUsed.HasValue && vramTotal.HasValue)
                 {
-                    VramUsed = $"{vramUsed / 1024f:F1} GB";
-                    VramTotal = $"{vramTotal / 1024f:F1} GB";
+                    VramUsed = $"{vramUsed.Value / 1024f:F1} GB";
+                    VramTotal = $"{vramTotal.Value / 1024f:F1} GB";
                 }
             }
 
+                    // ✅ FIX: Use Windows API for RAM (Much more reliable than LHM sensors)
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            var memStatus = new NativeMethods.MEMORYSTATUSEX();
+            memStatus.dwLength = (uint)Marshal.SizeOf(memStatus);
+            if (NativeMethods.GlobalMemoryStatusEx(ref memStatus))
+            {
+                double usedGB = (memStatus.ullTotalPhys - memStatus.ullAvailPhys) / (1024.0 * 1024.0 * 1024.0);
+                double totalGB = memStatus.ullTotalPhys / (1024.0 * 1024.0 * 1024.0);
+                RamUsed = $"{usedGB:F1} GB";
+                RamTotal = $"{totalGB:F1} GB";
+            }
+        }
+        else
+        {
+            // Keep old LHM logic for Linux just in case, though this file is Windows-focused
             if (_ram != null)
             {
-                float? ramUsed = GetHighestVramFloat(_ram, new[] { "Memory Used" });
-                float? ramAvail = GetHighestVramFloat(_ram, new[] { "Memory Available" });
-                if (ramUsed.HasValue && ramAvail.HasValue)
-                {
-                    float total = ramUsed.Value + ramAvail.Value;
-                    RamUsed = $"{ramUsed.Value:F1} GB";
-                    RamTotal = $"{total:F1} GB";
+                float ramUsedMB = 0f;
+                float ramAvailMB = 0f;
+                bool hasUsed = false, hasAvail = false;
+
+                var allSensors = new List<ISensor>(_ram.Sensors);
+                foreach (var sub in _ram.SubHardware) allSensors.AddRange(sub.Sensors);
+
+                    foreach (var s in allSensors)
+                    {
+                        if (s.SensorType == SensorType.Data && s.Value.HasValue)
+                        {
+                            if (s.Name.Contains("Memory Used", StringComparison.OrdinalIgnoreCase))
+                            {
+                                ramUsedMB += s.Value.Value;
+                                hasUsed = true;
+                            }
+                            else if (s.Name.Contains("Memory Available", StringComparison.OrdinalIgnoreCase))
+                            {
+                                ramAvailMB += s.Value.Value;
+                                hasAvail = true;
+                            }
+                        }
+                    }
+
+                    if (hasUsed && hasAvail)
+                    {
+                        float totalMB = ramUsedMB + ramAvailMB;
+                        RamUsed = $"{ramUsedMB / 1024f:F1} GB";
+                        RamTotal = $"{totalMB / 1024f:F1} GB";
+                    }
                 }
             }
         }
@@ -334,6 +375,32 @@ namespace XOSC
                 }
             }
             return found ? maxVal : null;
+        }
+        private static float? GetVramSensorValue(IHardware hw, string[] priorityNames)
+        {
+            if (hw == null) return null;
+            var allSensors = new List<ISensor>(hw.Sensors);
+            foreach (var sub in hw.SubHardware) allSensors.AddRange(sub.Sensors);
+
+            // 1. Try to find the specific priority names first
+            foreach (var name in priorityNames)
+            {
+                var sensor = allSensors.FirstOrDefault(s =>
+                    (s.SensorType == SensorType.Data || s.SensorType == SensorType.SmallData) &&
+                    s.Name.Contains(name, StringComparison.OrdinalIgnoreCase) &&
+                    s.Value.HasValue);
+                
+                if (sensor != null) return sensor.Value.Value;
+            }
+
+            // 2. Fallback for iGPUs: If we didn't find Dedicated, look for "GPU Memory Total" (Shared)
+            // This fixes the 0.5GB issue on AMD APUs
+            var fallbackSensor = allSensors.FirstOrDefault(s =>
+                (s.SensorType == SensorType.Data || s.SensorType == SensorType.SmallData) &&
+                (s.Name.Contains("GPU Memory Total", StringComparison.OrdinalIgnoreCase) || s.Name.Contains("Memory Total", StringComparison.OrdinalIgnoreCase)) &&
+                s.Value.HasValue);
+
+            return fallbackSensor?.Value;
         }
 
         private class UpdateVisitor : IVisitor
@@ -594,7 +661,7 @@ namespace XOSC
             }
         }
 
-        private static void ScrapeHardwareNames() { string log = Program.FindVrcLog(); if (log == null) return; try { using var fs = new FileStream(log, FileMode.Open, FileAccess.Read, FileShare.ReadWrite); using var sr = new StreamReader(fs); string l; int count = 0; while ((l = sr.ReadLine()) != null && count < 2000) { count++; if (l.Contains("Processor Type:")) { string r = l.Substring(l.IndexOf(':') + 1); _cpu = Regex.Replace(Regex.Replace(r, @"(?i)(AMD|Intel(?:\(R\))?|Core(?:\(TM\))?|Ryzen|\d+-Core|Processor|@.*)", ""), @"\s+", " ").Trim(); } else if (l.Contains("Graphics Device Name:")) { string r = l.Substring(l.IndexOf(':') + 1); _gpu = Regex.Replace(Regex.Replace(r, @"(?i)(NVIDIA|AMD|GeForce|Radeon|Graphics|\(RADV.*?\)|Direct3D.*)", ""), @"\s+", " ").Trim(); } } } catch { } }
+        private static void ScrapeHardwareNames() { string log = Program.FindVrcLog(); if (log == null) return; try { using var fs = new FileStream(log, FileMode.Open, FileAccess.Read, FileShare.ReadWrite); using var sr = new StreamReader(fs); string l; int count = 0; while ((l = sr.ReadLine()) != null && count < 2000) { count++; if (l.Contains("Processor Type:")) { string r = l.Substring(l.IndexOf(':') + 1); _cpu = Regex.Replace(Regex.Replace(r, @"(?i)(AMD|Intel(?:\(R\))?|Core(?:\(TM\))?|Ryzen|\d+-Core|Processor|@.*)", " "), @"\s+", " ").Trim(); } else if (l.Contains("Graphics Device Name:")) { string r = l.Substring(l.IndexOf(':') + 1); _gpu = Regex.Replace(Regex.Replace(r, @"(?i)(NVIDIA|AMD|GeForce|Radeon|Graphics|\(RADV.*?\)|Direct3D.*)", ""), @"\s+", " ").Trim(); } } } catch { } }
         private static string GetDistroName() { if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return "Windows"; try { if (File.Exists("/etc/os-release")) { string? n = null, p = null; foreach (var l in File.ReadLines("/etc/os-release")) { if (l.StartsWith("NAME=")) n = l[5..].Trim('"', '\''); if (l.StartsWith("PRETTY_NAME=")) p = l[12..].Trim('"', '\''); } return (n ?? p ?? "Linux").Split(' ')[0]; } } catch { } return "Linux"; }
         private static string Stylize(string t) { string n = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", s = "ᵃᵇᶜᵈᵉᶠᵍʰᶦʲᵏˡᵐⁿᵒᵖᵠʳˢᵗᵘᵛʷˣʸᶻᵃᵇᶜᵈᵉᶠᵍʰᶦʲᵏˡᵐⁿᵒᵖᵠʳˢᵗᵘᵛʷˣʸᶻ⁰¹²³⁴⁵⁶⁷⁸⁹"; StringBuilder sb = new(); foreach (char c in t) { int i = n.IndexOf(c); sb.Append(i != -1 ? s[i] : c); } return sb.ToString(); }
         [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll")] private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
