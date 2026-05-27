@@ -9,6 +9,7 @@
         <UseWindowsForms>false</UseWindowsForms>
 
         <!-- Windows: embed icon into the .exe so it shows in Explorer -->
+        <DefineConstants>WINDOWS</DefineConstants>
         <ApplicationIcon Condition="$([MSBuild]::IsOsPlatform('Windows'))">icon.ico</ApplicationIcon>
 
         <!-- Version info -->
