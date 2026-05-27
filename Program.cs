@@ -188,6 +188,15 @@ namespace XOSC
         public static void Initialize()
         {
             if (_initialized) return;
+
+            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                // On Linux, LibreHardwareMonitor is not supported.
+                // Hardware stats will be read from /proc and nvidia-smi in Update().
+                _initialized = true;
+                return;
+            }
+
             _computer = new Computer 
             { 
                 IsCpuEnabled = true, 
@@ -220,6 +229,13 @@ namespace XOSC
         public static void Update()
         {
             if (!_initialized) return;
+
+            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                UpdateLinux();
+                return;
+            }
+
             _computer.Accept(new UpdateVisitor());
 
             if (_cpu != null)
@@ -304,6 +320,131 @@ namespace XOSC
                     }
                 } 
             }
+        }
+
+        private static void UpdateLinux()
+        {
+            // ── CPU load from /proc/stat ──────────────────────────────────────
+            try
+            {
+                var lines = File.ReadAllLines("/proc/stat");
+                var cpu = lines.FirstOrDefault(l => l.StartsWith("cpu "));
+                if (cpu != null)
+                {
+                    var parts = cpu.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length >= 5)
+                    {
+                        long user = long.Parse(parts[1]), nice = long.Parse(parts[2]),
+                             sys  = long.Parse(parts[3]), idle = long.Parse(parts[4]),
+                             iow  = parts.Length > 5 ? long.Parse(parts[5]) : 0;
+                        long total = user + nice + sys + idle + iow;
+                        long busy  = total - idle - iow;
+                        CpuLoad = total > 0 ? $"{(busy * 100.0 / total):F0}%" : "--%";
+                    }
+                }
+            }
+            catch { CpuLoad = "--%"; }
+
+            // ── CPU temp from /sys/class/thermal ─────────────────────────────
+            try
+            {
+                var zones = Directory.GetDirectories("/sys/class/thermal", "thermal_zone*");
+                double best = double.MinValue;
+                foreach (var z in zones)
+                {
+                    string typePath = Path.Combine(z, "type");
+                    string tempPath = Path.Combine(z, "temp");
+                    if (!File.Exists(tempPath)) continue;
+                    string type = File.Exists(typePath) ? File.ReadAllText(typePath).Trim() : "";
+                    if (type.Contains("acpitz") || type.Contains("x86_pkg") || type.Contains("cpu"))
+                    {
+                        if (double.TryParse(File.ReadAllText(tempPath).Trim(), out double raw))
+                            best = Math.Max(best, raw / 1000.0);
+                    }
+                }
+                CpuTemp = best > double.MinValue ? $"{best:F0}°C" : "--°C";
+            }
+            catch { CpuTemp = "--°C"; }
+
+            // ── RAM from /proc/meminfo ────────────────────────────────────────
+            try
+            {
+                long memTotal = 0, memAvail = 0;
+                foreach (var line in File.ReadAllLines("/proc/meminfo"))
+                {
+                    if (line.StartsWith("MemTotal:") && long.TryParse(line.Split(':')[1].Trim().Split(' ')[0], out long t)) memTotal = t;
+                    if (line.StartsWith("MemAvailable:") && long.TryParse(line.Split(':')[1].Trim().Split(' ')[0], out long a)) memAvail = a;
+                }
+                double usedGB  = (memTotal - memAvail) / (1024.0 * 1024.0);
+                double totalGB = memTotal / (1024.0 * 1024.0);
+                RamUsed  = $"{usedGB:F1} GB";
+                RamTotal = $"{totalGB:F1} GB";
+            }
+            catch { RamUsed = "-- GB"; RamTotal = "-- GB"; }
+
+            // ── GPU via nvidia-smi (NVIDIA) ───────────────────────────────────
+            try
+            {
+                var psi = new ProcessStartInfo("nvidia-smi",
+                    "--query-gpu=utilization.gpu,temperature.gpu,power.draw,memory.used,memory.total " +
+                    "--format=csv,noheader,nounits")
+                {
+                    RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true
+                };
+                using var p = Process.Start(psi);
+                string? raw = p?.StandardOutput.ReadLine()?.Trim();
+                if (!string.IsNullOrEmpty(raw))
+                {
+                    var v = raw.Split(',');
+                    if (v.Length >= 5)
+                    {
+                        GpuLoad  = $"{v[0].Trim()}%";
+                        GpuTemp  = $"{v[1].Trim()}°C";
+                        CpuPower = "--W"; // CPU power not from nvidia-smi
+                        GpuPower = $"{double.Parse(v[2].Trim(), CultureInfo.InvariantCulture):F0}W";
+                        double vUsed  = double.Parse(v[3].Trim(), CultureInfo.InvariantCulture);
+                        double vTotal = double.Parse(v[4].Trim(), CultureInfo.InvariantCulture);
+                        VramUsed  = $"{vUsed  / 1024.0:F1} GB";
+                        VramTotal = $"{vTotal / 1024.0:F1} GB";
+                        return;
+                    }
+                }
+            }
+            catch { }
+
+            // ── GPU fallback: AMD via /sys/class/drm ──────────────────────────
+            try
+            {
+                string hwmonBase = "/sys/class/drm/card0/device/hwmon";
+                if (Directory.Exists(hwmonBase))
+                {
+                    var hwmon = Directory.GetDirectories(hwmonBase).FirstOrDefault();
+                    if (hwmon != null)
+                    {
+                        string tempFile = Directory.GetFiles(hwmon, "temp1_input").FirstOrDefault() ?? "";
+                        if (File.Exists(tempFile) && double.TryParse(File.ReadAllText(tempFile).Trim(), out double tRaw))
+                            GpuTemp = $"{tRaw / 1000.0:F0}°C";
+                        string pwrFile = Directory.GetFiles(hwmon, "power1_average").FirstOrDefault() ?? "";
+                        if (File.Exists(pwrFile) && double.TryParse(File.ReadAllText(pwrFile).Trim(), out double pRaw))
+                            GpuPower = $"{pRaw / 1_000_000.0:F0}W";
+                    }
+                }
+                string busyFile = "/sys/class/drm/card0/device/gpu_busy_percent";
+                if (File.Exists(busyFile)) GpuLoad = $"{File.ReadAllText(busyFile).Trim()}%";
+
+                string memUsedFile  = "/sys/class/drm/card0/device/mem_info_vram_used";
+                string memTotalFile = "/sys/class/drm/card0/device/mem_info_vram_total";
+                if (File.Exists(memUsedFile) && File.Exists(memTotalFile))
+                {
+                    if (long.TryParse(File.ReadAllText(memUsedFile).Trim(),  out long vU) &&
+                        long.TryParse(File.ReadAllText(memTotalFile).Trim(), out long vT))
+                    {
+                        VramUsed  = $"{vU / (1024.0 * 1024.0 * 1024.0):F1} GB";
+                        VramTotal = $"{vT / (1024.0 * 1024.0 * 1024.0):F1} GB";
+                    }
+                }
+            }
+            catch { }
         }
 
         public static void Close()
@@ -671,7 +812,7 @@ namespace XOSC
         static Vector4 DeriveSubText(Vector4 bg) { bool l = (bg.X + bg.Y + bg.Z) / 3f > 0.6f; return l ? new Vector4(0.35f, 0.35f, 0.42f, 1f) : new Vector4(0.52f, 0.52f, 0.60f, 1f); }
         public static void Main() { 
 #if RELEASE
-            unsafe { Raylib.SetTraceLogCallback(&NativeMethods.RaylibLogCallback); } Raylib.SetTraceLogLevel(TraceLogLevel.None); Console.SetOut(TextWriter.Null); Console.SetError(TextWriter.Null); if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) NativeMethods.FreeConsole();
+            unsafe { Raylib.SetTraceLogCallback(&NativeMethods.RaylibLogCallback); } Raylib.SetTraceLogLevel(TraceLogLevel.None); Console.SetOut(TextWriter.Null); Console.SetError(TextWriter.Null); if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) NativeMethods.FreeConsole(); 
 #endif
             LoadConfig(); ColAccent = V4(Config.AccentColor); ColBg = V4(Config.BgColor); ColSidebar = V4(Config.SidebarColor); ColCard = V4(Config.CardColor); ColText = DeriveText(V4(Config.BgColor)); ColSubText = DeriveSubText(V4(Config.BgColor)); _mtx = new Mutex(true, "XOSC_VRC_Unique_Runner", out bool fresh); if (!fresh) Environment.Exit(0); Directory.CreateDirectory(Path.GetDirectoryName(_path)); if (Config.SavedVersion != AppVersion) { Config.SavedVersion = AppVersion; SaveConfig(); } MusicChatEngine.Init(); Raylib.InitWindow(960, 640, "XOSC"); try { string iP = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "icon.png"); if (!File.Exists(iP)) iP = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "icon.ico"); if (File.Exists(iP)) { Image img = Raylib.LoadImage(iP); Raylib.SetWindowIcon(img); Raylib.UnloadImage(img); } } catch { } Raylib.SetWindowState(ConfigFlags.ResizableWindow); rlImGui.Setup(true); Raylib.SetTargetFPS(60); ApplyTheme(); while (!Raylib.WindowShouldClose()) { Raylib.BeginDrawing(); Raylib.ClearBackground(new Color((int)(Config.BgColor[0]*255),(byte)(Config.BgColor[1]*255),(byte)(Config.BgColor[2]*255),255)); rlImGui.Begin(); DrawUI(); rlImGui.End(); Raylib.EndDrawing(); } NetworkStats.Stop(); HardwareService.Close(); SaveConfig(); Raylib.CloseWindow(); }
         public static string FindVrcLog() { if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) { string wP = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "AppData", "LocalLow", "VRChat", "VRChat"); if (Directory.Exists(wP)) return Directory.GetFiles(wP, "output_log_*.txt").OrderByDescending(File.GetLastWriteTime).FirstOrDefault(); return null; } string h = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile); string[] s = { Path.Combine(h, ".local/share/Steam"), Path.Combine(h, ".var/app/com.valvesoftware.Steam/.local/share/Steam") }; foreach (var b in s) { if (!Directory.Exists(b)) continue; string v = Path.Combine(b, "steamapps", "libraryfolders.vdf"); List<string> l = new() { b }; if (File.Exists(v)) { var ms = Regex.Matches(File.ReadAllText(v), "\"path\"\\s+\"(.+?)\""); foreach (Match m in ms) l.Add(m.Groups[1].Value.Replace("\\\\", "/")); } foreach (var lib in l) { string p = Path.Combine(lib, "steamapps/compatdata/438100/pfx/drive_c/users/steamuser/AppData/LocalLow/VRChat/VRChat"); if (Directory.Exists(p)) return Directory.GetFiles(p, "output_log_*.txt").OrderByDescending(File.GetLastWriteTime).FirstOrDefault(); } } return null; }
