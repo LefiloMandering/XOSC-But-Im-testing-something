@@ -286,10 +286,7 @@ namespace XOSC
 
                 using var ms = new MemoryStream(z);
                 using var arch = new ZipArchive(ms);
-
-                // FIXED: Your GitHub Actions now packages like:
-                // XOSC/win-x64/*
-                // XOSC/linux-x64/*
+                
                 string platformFolder = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
                     ? "XOSC/win-x64/"
                     : "XOSC/linux-x64/";
@@ -298,7 +295,6 @@ namespace XOSC
                     .Where(e => e.FullName.StartsWith(platformFolder, StringComparison.OrdinalIgnoreCase))
                     .ToList();
 
-                // FIXED: Executable names
                 string[] names = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
                     ? new[] { "XOSC.exe" }
                     : new[] { "XOSC" };
