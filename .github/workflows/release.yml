@@ -162,8 +162,8 @@ jobs:
         uses: ncipollo/release-action@v1
         with:
           artifacts: XOSC.zip
-          tag: v${{ needs.versioning.outputs.version }}
-          name: v${{ needs.versioning.outputs.version }}
+          tag: {{ needs.versioning.outputs.version }}
+          name: {{ needs.versioning.outputs.version }}
           prerelease: false
           makeLatest: true
         env:
