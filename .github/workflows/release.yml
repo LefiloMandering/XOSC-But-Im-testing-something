@@ -106,7 +106,7 @@ jobs:
           fi
         shell: bash
 
-      - name: Upload artifact
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-${{ matrix.rid }}${{ matrix.appimage && '-appimage' || '' }}
@@ -114,7 +114,7 @@ jobs:
             XOSC-*.zip
             XOSC-*.AppImage
 
-  # Final packaging into one XOSC.zip
+  # Final clean packaging
   package:
     needs: build
     runs-on: ubuntu-latest
@@ -125,15 +125,30 @@ jobs:
         with:
           path: ./builds
 
-      - name: Create single XOSC.zip
+      - name: Create final XOSC.zip
         run: |
-          mkdir -p XOSC
-          cp -r builds/*/* XOSC/ 2>/dev/null || true
-          cd XOSC
-          zip -r ../XOSC.zip .
+          mkdir -p final/XOSC
+          
+          # Extract Windows files
+          if [ -f builds/build-win-x64/XOSC-win-x64.zip ]; then
+            unzip -o builds/build-win-x64/XOSC-win-x64.zip -d final/XOSC/
+          fi
+          
+          # Extract Linux files
+          if [ -f builds/build-linux-x64/XOSC-linux-x64.zip ]; then
+            unzip -o builds/build-linux-x64/XOSC-linux-x64.zip -d final/XOSC/
+          fi
+          
+          # Copy AppImage
+          if [ -f builds/build-linux-x64-appimage/XOSC-x86_64.AppImage ]; then
+            cp builds/build-linux-x64-appimage/XOSC-x86_64.AppImage final/XOSC/
+          fi
+          
+          cd final
+          zip -r ../XOSC.zip XOSC/
         shell: bash
 
-      - name: Upload XOSC.zip
+      - name: Upload final XOSC.zip
         uses: actions/upload-artifact@v4
         with:
           name: XOSC
@@ -146,7 +161,7 @@ jobs:
       contents: write
 
     steps:
-      - name: Download final package
+      - name: Download XOSC.zip
         uses: actions/download-artifact@v4
         with:
           name: XOSC
