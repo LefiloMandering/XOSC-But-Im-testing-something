@@ -25,7 +25,7 @@ jobs:
           IFS='.' read -r MAJOR MINOR PATCH <<< "${VERSION:-0.0.0}"
           NEW_PATCH=$((PATCH + 1))
           NEW_VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}"
-          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
           echo "New version: $NEW_VERSION"
         shell: bash
 
@@ -87,6 +87,7 @@ jobs:
           mkdir -p AppDir/usr/bin
           cp -r ./publish/linux-x64/* AppDir/usr/bin/
 
+          # TODO: replace with a real icon
           touch AppDir/xosc.png
 
           cat > AppDir/xosc.desktop << EOF
@@ -147,7 +148,7 @@ jobs:
           path: XOSC.zip
 
   release:
-    needs: package
+    needs: [versioning, package]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -162,8 +163,8 @@ jobs:
         uses: ncipollo/release-action@v1
         with:
           artifacts: XOSC.zip
-          tag: {{ needs.versioning.outputs.version }}
-          name: {{ needs.versioning.outputs.version }}
+          tag: v${{ needs.versioning.outputs.version }}
+          name: v${{ needs.versioning.outputs.version }}
           prerelease: false
           makeLatest: true
         env:
