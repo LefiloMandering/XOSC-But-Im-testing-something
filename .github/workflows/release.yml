@@ -67,10 +67,14 @@ jobs:
           mkdir -p AppDir/usr/bin
           cp -r ./publish/linux-x64/* AppDir/usr/bin/
 
+          # Create dummy icon to stop the error
+          touch AppDir/xosc.png
+
           cat > AppDir/xosc.desktop << EOF
           [Desktop Entry]
           Name=XOSC
           Exec=usr/bin/XOSC
+          Icon=xosc
           Type=Application
           Categories=Utility;
           Terminal=false
@@ -83,9 +87,6 @@ jobs:
           EOF
           chmod +x AppDir/AppRun
           chmod +x AppDir/usr/bin/XOSC
-
-          sudo apt-get update
-          sudo apt-get install -y libfuse2t64 || sudo apt-get install -y libfuse2
 
           wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
