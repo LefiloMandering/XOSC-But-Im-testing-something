@@ -1,65 +1,66 @@
-name: Build and Release
-
-on:
-  push:
-    branches:
-      - master
-
 jobs:
-  build-and-release:
-    runs-on: windows-latest
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+          - os: ubuntu-latest
+            rid: linux-x64
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: write
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0'
 
       - name: Restore dependencies
         run: dotnet restore
 
-      - name: Get Git commit hash
+      - name: Get commit hash
         id: get_version
-        run: |
-          $hash = "${{ github.sha }}".Substring(0, 7)
-          echo "version=$hash" >> $env:GITHUB_OUTPUT
-          echo "Found commit hash: $hash"
-        shell: powershell
+        run: echo "version=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+        shell: bash
 
-      - name: Build single-file for Windows x64
+      - name: Publish
         run: |
-          $hash = "${{ steps.get_version.outputs.version }}"
-          dotnet publish -c Release -r win-x64 --self-contained true `
-            -p:PublishSingleFile=true `
-            -p:DebugType=none `
-            -p:EnableCompressionInSingleFile=true `
-            -p:InformationalVersion=$hash `
-            -o ./publish/win-x64 XOSC.csproj
-        shell: powershell
+          dotnet publish -c Release -r ${{ matrix.rid }} --self-contained true \
+            -p:PublishSingleFile=true \
+            -p:DebugType=none \
+            -p:EnableCompressionInSingleFile=true \
+            -p:InformationalVersion=${{ steps.get_version.outputs.version }} \
+            -o ./publish/${{ matrix.rid }} XOSC.csproj
+        shell: bash
 
-      - name: Build single-file for Linux x64
-        run: |
-          $hash = "${{ steps.get_version.outputs.version }}"
-          dotnet publish -c Release -r linux-x64 --self-contained true `
-            -p:PublishSingleFile=true `
-            -p:DebugType=none `
-            -p:EnableCompressionInSingleFile=true `
-            -p:InformationalVersion=$hash `
-            -p:AssemblyTitle=XOSC `
-            -p:AssemblyName=XOSC `
-            -o ./publish/linux-x64 XOSC.csproj
-        shell: powershell
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.rid }}
+          path: ./publish/${{ matrix.rid }}
 
-      - name: Create ZIP archive with both platforms
-        run: |
-          Compress-Archive -Path ./publish/* -DestinationPath XOSC.zip
-          Write-Host "Created XOSC.zip with single-file executables"
-        shell: powershell
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Get commit hash
+        id: get_version
+        run: echo "version=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./publish
+
+      - name: Create ZIP
+        run: zip -r XOSC.zip ./publish
 
       - name: Create Release
         uses: ncipollo/release-action@v1
