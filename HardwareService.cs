@@ -305,35 +305,112 @@ namespace XOSC
         {
             try
             {
-                string busyFile = "/sys/class/drm/card0/device/gpu_busy_percent";
-                if (File.Exists(busyFile)) GpuLoad = $"{File.ReadAllText(busyFile).Trim()}%";
+                var drmCards = Directory.GetDirectories("/sys/class/drm", "card*")
+                    .Where(c => !c.Contains('-'))
+                    .ToList();
 
-                string hwmonBase = "/sys/class/drm/card0/device/hwmon";
-                if (Directory.Exists(hwmonBase))
+                string? selectedCard = null;
+                long largestVram = -1;
+
+                foreach (var card in drmCards)
                 {
-                    var hwmon = Directory.GetDirectories(hwmonBase).FirstOrDefault();
-                    if (hwmon != null)
+                    string device = Path.Combine(card, "device");
+
+                    // AMD only
+                    string vendorFile = Path.Combine(device, "vendor");
+
+                    if (!File.Exists(vendorFile))
+                        continue;
+
+                    string vendor = File.ReadAllText(vendorFile).Trim().ToLower();
+
+                    if (vendor != "0x1002")
+                        continue;
+
+                    // Read VRAM amount
+                    string vramFile = Path.Combine(device, "mem_info_vram_total");
+
+                    long vram = 0;
+
+                    if (File.Exists(vramFile))
                     {
-                        var tf = Directory.GetFiles(hwmon, "temp1_input").FirstOrDefault();
-                        if (tf != null && double.TryParse(File.ReadAllText(tf).Trim(), out double tRaw))
-                            GpuTemp = $"{tRaw / 1000.0:F0}°C";
-                        var pf = Directory.GetFiles(hwmon, "power1_average").FirstOrDefault();
-                        if (pf != null && double.TryParse(File.ReadAllText(pf).Trim(), out double pRaw))
-                            GpuPower = $"{pRaw / 1_000_000.0:F0}W";
+                        long.TryParse(File.ReadAllText(vramFile).Trim(), out vram);
+                    }
+
+                    // Prefer GPU with largest VRAM
+                    if (vram > largestVram)
+                    {
+                        largestVram = vram;
+                        selectedCard = card;
                     }
                 }
 
-                string vUsedFile  = "/sys/class/drm/card0/device/mem_info_vram_used";
-                string vTotalFile = "/sys/class/drm/card0/device/mem_info_vram_total";
-                if (File.Exists(vUsedFile) && File.Exists(vTotalFile) &&
-                    long.TryParse(File.ReadAllText(vUsedFile).Trim(),  out long vU) &&
+                // Fallback: highest card number
+                if (selectedCard == null && drmCards.Count > 0)
+                {
+                    selectedCard = drmCards
+                        .OrderByDescending(c =>
+                        {
+                            string name = Path.GetFileName(c);
+                            return int.TryParse(name.Replace("card", ""), out int n) ? n : -1;
+                        })
+                        .FirstOrDefault();
+                }
+
+                if (selectedCard == null)
+                    return;
+
+                string selectedDevice = Path.Combine(selectedCard, "device");
+
+                // GPU usage
+                string busyFile = Path.Combine(selectedDevice, "gpu_busy_percent");
+
+                if (File.Exists(busyFile))
+                    GpuLoad = $"{File.ReadAllText(busyFile).Trim()}%";
+
+                // Temps + Power
+                string hwmonBase = Path.Combine(selectedDevice, "hwmon");
+
+                if (Directory.Exists(hwmonBase))
+                {
+                    var hwmon = Directory.GetDirectories(hwmonBase).FirstOrDefault();
+
+                    if (hwmon != null)
+                    {
+                        string tempFile = Path.Combine(hwmon, "temp1_input");
+
+                        if (File.Exists(tempFile) &&
+                            double.TryParse(File.ReadAllText(tempFile).Trim(), out double tRaw))
+                        {
+                            GpuTemp = $"{tRaw / 1000.0:F0}°C";
+                        }
+
+                        string powerFile = Path.Combine(hwmon, "power1_average");
+
+                        if (File.Exists(powerFile) &&
+                            double.TryParse(File.ReadAllText(powerFile).Trim(), out double pRaw))
+                        {
+                            GpuPower = $"{pRaw / 1_000_000.0:F0}W";
+                        }
+                    }
+                }
+
+                // VRAM
+                string vUsedFile = Path.Combine(selectedDevice, "mem_info_vram_used");
+                string vTotalFile = Path.Combine(selectedDevice, "mem_info_vram_total");
+
+                if (File.Exists(vUsedFile) &&
+                    File.Exists(vTotalFile) &&
+                    long.TryParse(File.ReadAllText(vUsedFile).Trim(), out long vU) &&
                     long.TryParse(File.ReadAllText(vTotalFile).Trim(), out long vT))
                 {
-                    VramUsed  = $"{vU / (1024.0 * 1024.0 * 1024.0):F1} GB";
+                    VramUsed = $"{vU / (1024.0 * 1024.0 * 1024.0):F1} GB";
                     VramTotal = $"{vT / (1024.0 * 1024.0 * 1024.0):F1} GB";
                 }
             }
-            catch { }
+            catch
+            {
+            }
         }
 #endif
     }
