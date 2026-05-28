@@ -86,7 +86,6 @@ jobs:
           wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
 
-          # Correct command as per AppImage docs
           ARCH=x86_64 ./appimagetool-x86_64.AppImage AppDir XOSC-x86_64.AppImage
         shell: bash
         
