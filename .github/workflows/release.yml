@@ -134,7 +134,7 @@ jobs:
       contents: write
 
     steps:
-      - name: Download final zip
+      - name: Download XOSC.zip
         uses: actions/download-artifact@v4
         with:
           name: XOSC
@@ -143,8 +143,8 @@ jobs:
         uses: ncipollo/release-action@v1
         with:
           artifacts: XOSC.zip
-          tag: ${{ needs.build.outputs.version }}
-          name: ${{ needs.build.outputs.version }}
+          tag: latest
+          name: latest
           prerelease: false
           makeLatest: true
         env:
