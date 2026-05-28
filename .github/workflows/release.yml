@@ -44,7 +44,7 @@ jobs:
         run: echo "version=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
         shell: bash
 
-      # === Build ===
+      # Build the app
       - name: Publish ${{ matrix.rid }}
         run: |
           dotnet publish -c Release -r ${{ matrix.rid }} --self-contained true \
@@ -55,7 +55,13 @@ jobs:
             -o ./publish/${{ matrix.rid }} XOSC.csproj
         shell: bash
 
-      # === AppImage (only for the AppImage matrix entry) ===
+      # === AppImage specific steps ===
+      - name: Install FUSE (for AppImage)
+        if: matrix.appimage
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse2t64 || sudo apt-get install -y libfuse2
+
       - name: Create AppImage
         if: matrix.appimage
         run: |
@@ -81,7 +87,6 @@ jobs:
           EOF
           chmod +x AppDir/AppRun
 
-          # Icon (optional but nice)
           if [ -f "icon.png" ]; then
             cp icon.png AppDir/xosc.png
             cp icon.png AppDir/usr/share/icons/hicolor/256x256/apps/xosc.png
@@ -90,10 +95,11 @@ jobs:
           wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
 
-          ./appimagetool-x86_64.AppImage AppDir XOSC-${{ steps.version.outputs.version }}-x86_64.AppImage
+          # Use extract-and-run to avoid FUSE issues in GitHub Actions
+          ./appimagetool-x86_64.AppImage --appimage-extract-and-run AppDir XOSC-${{ steps.version.outputs.version }}-x86_64.AppImage
         shell: bash
 
-      # === ZIP for normal builds ===
+      # === ZIP for Windows + Linux single-file ===
       - name: Create ZIP archive
         if: ${{ !matrix.appimage }}
         run: |
