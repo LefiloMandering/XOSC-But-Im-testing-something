@@ -268,7 +268,7 @@ namespace XOSC
                 // Compare versions
                 if (localVersion == latestVersion)
                 {
-                    Status = "It's on the same version — we're already on latest";
+                    Status = "already on latest";
                     return;
                 }
 
