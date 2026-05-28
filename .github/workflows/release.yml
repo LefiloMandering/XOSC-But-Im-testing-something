@@ -44,7 +44,6 @@ jobs:
         run: echo "version=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
         shell: bash
 
-      # Build the app
       - name: Publish ${{ matrix.rid }}
         run: |
           dotnet publish -c Release -r ${{ matrix.rid }} --self-contained true \
@@ -55,7 +54,7 @@ jobs:
             -o ./publish/${{ matrix.rid }} XOSC.csproj
         shell: bash
 
-      # === AppImage specific steps ===
+      # AppImage
       - name: Install FUSE
         if: matrix.appimage
         run: |
@@ -65,8 +64,7 @@ jobs:
       - name: Create AppImage
         if: matrix.appimage
         run: |
-          mkdir -p AppDir/usr/bin
-          mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
+          mkdir -p AppDir/usr/bin AppDir/usr/share/icons/hicolor/256x256/apps
 
           cp -r ./publish/linux-x64/* AppDir/usr/bin/
 
@@ -98,13 +96,13 @@ jobs:
           ./appimagetool-x86_64.AppImage --appimage-extract-and-run AppDir XOSC-${{ steps.version.outputs.version }}-x86_64.AppImage
         shell: bash
 
-      # === ZIP Archive (fixed for both Windows and Linux) ===
-      - name: Create ZIP archive
+      # ZIP per platform
+      - name: Create platform ZIP
         if: ${{ !matrix.appimage }}
         run: |
           cd publish
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            powershell -Command "Compress-Archive -Path ${{ matrix.rid }} -DestinationPath ../XOSC-${{ steps.version.outputs.version }}-${{ matrix.rid }}.zip"
+            powershell -Command "Compress-Archive -Path ${{ matrix.rid }} -DestinationPath ../XOSC-${{ steps.version.outputs.version }}-${{ matrix.rid }}.zip -Force"
           else
             zip -r ../XOSC-${{ steps.version.outputs.version }}-${{ matrix.rid }}.zip ${{ matrix.rid }}
           fi
@@ -115,11 +113,38 @@ jobs:
         with:
           name: XOSC-${{ matrix.rid }}${{ matrix.appimage && '-AppImage' || '' }}
           path: |
-            *.zip
-            *.AppImage
+            XOSC-*.zip
+            XOSC-*.AppImage
+
+  # Final job: Create one big universal ZIP
+  package-all:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Create Universal ZIP (All Platforms)
+        run: |
+          cd artifacts
+          mkdir -p XOSC-All
+          cp */*.zip XOSC-All/ 2>/dev/null || true
+          cp */*.AppImage XOSC-All/ 2>/dev/null || true
+          cd XOSC-All
+          zip -r ../XOSC-${{ needs.build.outputs.version || github.sha }}-ALL.zip .
+        shell: bash
+
+      - name: Upload Universal ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: XOSC-ALL
+          path: XOSC-*-ALL.zip
 
   release:
-    needs: build
+    needs: [build, package-all]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -130,10 +155,10 @@ jobs:
         with:
           path: ./artifacts
 
-      - name: Create Release
+      - name: Create GitHub Release
         uses: ncipollo/release-action@v1
         with:
-          artifacts: ./artifacts/**/*.*
+          artifacts: ./artifacts/**/*.{zip,AppImage}
           tag: v${{ steps.version.outputs.version || github.sha }}
           name: v${{ steps.version.outputs.version || github.sha }}
           prerelease: false
