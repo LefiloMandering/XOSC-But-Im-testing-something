@@ -288,8 +288,8 @@ namespace XOSC
                 using var arch = new ZipArchive(ms);
                 
                 string platformFolder = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-                    ? "XOSC/win-x64/"
-                    : "XOSC/linux-x64/";
+                    ? "win-x64/"
+                    : "linux-x64/";
 
                 var entries = arch.Entries
                     .Where(e => e.FullName.StartsWith(platformFolder, StringComparison.OrdinalIgnoreCase))
