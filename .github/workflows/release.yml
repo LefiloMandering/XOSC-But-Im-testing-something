@@ -56,7 +56,7 @@ jobs:
         shell: bash
 
       # === AppImage specific steps ===
-      - name: Install FUSE (for AppImage)
+      - name: Install FUSE
         if: matrix.appimage
         run: |
           sudo apt-get update
@@ -95,16 +95,19 @@ jobs:
           wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
 
-          # Use extract-and-run to avoid FUSE issues in GitHub Actions
           ./appimagetool-x86_64.AppImage --appimage-extract-and-run AppDir XOSC-${{ steps.version.outputs.version }}-x86_64.AppImage
         shell: bash
 
-      # === ZIP for Windows + Linux single-file ===
+      # === ZIP Archive (fixed for both Windows and Linux) ===
       - name: Create ZIP archive
         if: ${{ !matrix.appimage }}
         run: |
           cd publish
-          zip -r ../XOSC-${{ steps.version.outputs.version }}-${{ matrix.rid }}.zip ${{ matrix.rid }}
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            powershell -Command "Compress-Archive -Path ${{ matrix.rid }} -DestinationPath ../XOSC-${{ steps.version.outputs.version }}-${{ matrix.rid }}.zip"
+          else
+            zip -r ../XOSC-${{ steps.version.outputs.version }}-${{ matrix.rid }}.zip ${{ matrix.rid }}
+          fi
         shell: bash
 
       - name: Upload artifact
