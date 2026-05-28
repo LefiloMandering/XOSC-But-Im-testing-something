@@ -388,12 +388,44 @@ namespace XOSC
                     }
                 }
                 try { var spot = Process.GetProcessesByName("Spotify"); foreach (var p in spot) { string t = p.MainWindowTitle; if (!string.IsNullOrWhiteSpace(t) && t != "Spotify" && t != "Spotify Premium") return (t, 0, 0); } } catch { }
-                #if WINDOWS
-                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) { StringBuilder b = new StringBuilder(256); IntPtr h = NativeMethods.GetForegroundWindow(); if (NativeMethods.GetWindowText(h, b, 256) > 0) { string t = b.ToString(); if (t.Contains("YouTube") || t.Contains("SoundCloud") || t.Contains("Spotify")) return (Regex.Replace(t, @" - (Spotify|YouTube|SoundCloud).*", "").Trim(), 0, 0); } }
+                #if WINDOWS_BUILD
+                {
+                    // Collect all browser process IDs so we only read titles from actual browser windows
+                    string[] browserNames = { "firefox", "chrome", "msedge", "brave", "opera", "vivaldi", "waterfox", "librewolf", "arc" };
+                    var browserPids = new HashSet<int>();
+                    foreach (var bn in browserNames)
+                        foreach (var bp in Process.GetProcessesByName(bn))
+                            browserPids.Add(bp.Id);
+
+                    string found = null;
+                    NativeMethods.EnumWindows((hWnd, _) => {
+                        if (!NativeMethods.IsWindowVisible(hWnd)) return true;
+                        NativeMethods.GetWindowThreadProcessId(hWnd, out uint pid);
+                        if (!browserPids.Contains((int)pid)) return true;
+                        var sb = new StringBuilder(512);
+                        if (NativeMethods.GetWindowText(hWnd, sb, 512) > 0) {
+                            string t = sb.ToString();
+                            // YouTube: "Song Title - YouTube"
+                            if (t.Contains("- YouTube"))
+                                { found = Regex.Replace(t, @"\s*-\s*YouTube.*", "").Trim(); return false; }
+                            // Spotify web: "Song - artist - Spotify"
+                            if (t.Contains("- Spotify"))
+                                { found = Regex.Replace(t, @"\s*-\s*Spotify.*", "").Trim(); return false; }
+                            // SoundCloud: "song title by artist" with no suffix
+                            if (t.Contains(" by "))
+                                { found = Regex.Replace(t, @"\s*[—–-]\s*\S.*$", "").Trim(); return false; }
+                        }
+                        return true;
+                    }, IntPtr.Zero);
+                    if (found != null) return (found, 0, 0);
+                }
                 #endif
                 return ("Chilling", 0, 0);
             } else {
-                try { var psi = new ProcessStartInfo("playerctl", "metadata --format \"{{artist}} - {{title}}\"") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true }; using var p = Process.Start(psi); string r = p?.StandardOutput.ReadToEnd().Trim() ?? ""; if (!string.IsNullOrEmpty(r) && r != " - ") { double pos = 0, len = 0; try { var pP = new ProcessStartInfo("playerctl", "position") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true }; using var pp = Process.Start(pP); double.TryParse(pp?.StandardOutput.ReadToEnd().Trim(), out pos); var pL = new ProcessStartInfo("playerctl", "metadata mpris:length") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true }; using var pl = Process.Start(pL); if (long.TryParse(pl?.StandardOutput.ReadToEnd().Trim(), out long lM)) len = lM / 1000000.0; } catch { } return (r, pos, len); } } catch { } return ("Chilling", 0, 0);
+                try { var psi = new ProcessStartInfo("playerctl", "metadata --format \"{{artist}} - {{title}}\"") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true }; using var p = Process.Start(psi); string r = p?.StandardOutput.ReadToEnd().Trim() ?? ""; if (!string.IsNullOrEmpty(r) && r != " - ") { double pos = 0, len = 0; try { var pP = new ProcessStartInfo("playerctl", "position") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true }; using var pp = Process.Start(pP); double.TryParse(pp?.StandardOutput.ReadToEnd().Trim(), out pos); var pL = new ProcessStartInfo("playerctl", "metadata mpris:length") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true }; using var pl = Process.Start(pL); if (long.TryParse(pl?.StandardOutput.ReadToEnd().Trim(), out long lM)) len = lM / 1000000.0; } catch { } return (r, pos, len); } } catch { }
+                // xdotool fallback — search ALL visible windows for browser titles (X11 only)
+                try { var xpsi = new ProcessStartInfo("xdotool", "search --name --onlyvisible .") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true }; using var xp = Process.Start(xpsi); string[] ids = (xp?.StandardOutput.ReadToEnd().Trim() ?? "").Split('\n', StringSplitOptions.RemoveEmptyEntries); foreach (var id in ids) { var npsi = new ProcessStartInfo("xdotool", $"getwindowname {id.Trim()}") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true }; using var np = Process.Start(npsi); string xt = np?.StandardOutput.ReadToEnd().Trim() ?? ""; if (xt.Contains("YouTube") || xt.Contains("SoundCloud") || xt.Contains("Spotify")) return (Regex.Replace(xt, @" - (Spotify|YouTube|SoundCloud).*", "").Trim(), 0, 0); } } catch { }
+                return ("Chilling", 0, 0);
             }
         }
 
