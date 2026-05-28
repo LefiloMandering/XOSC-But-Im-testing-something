@@ -6,10 +6,26 @@ on:
       - master
 
 jobs:
-  build-and-release:
-    runs-on: windows-latest
-    permissions:
-      contents: write
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+            singlefile: true
+            appimage: false
+
+          - os: ubuntu-latest
+            rid: linux-x64
+            singlefile: true
+            appimage: false
+
+          - os: ubuntu-latest
+            rid: linux-x64
+            singlefile: false
+            appimage: true
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout code
@@ -23,52 +39,103 @@ jobs:
       - name: Restore dependencies
         run: dotnet restore
 
-      - name: Get Git commit hash
-        id: get_version
+      - name: Get short commit hash
+        id: version
         run: |
-          $hash = "${{ github.sha }}".Substring(0, 7)
-          echo "version=$hash" >> $env:GITHUB_OUTPUT
-          echo "Found commit hash: $hash"
-        shell: powershell
+          echo "version=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+        shell: bash
 
-      - name: Build single-file for Windows x64
+      # === Build ===
+      - name: Publish ${{ matrix.rid }}
         run: |
-          $hash = "${{ steps.get_version.outputs.version }}"
-          dotnet publish -c Release -r win-x64 --self-contained true `
-            -p:PublishSingleFile=true `
-            -p:DebugType=none `
-            -p:EnableCompressionInSingleFile=true `
-            -p:InformationalVersion=$hash `
-            -o ./publish/win-x64 XOSC.csproj
-        shell: powershell
+          dotnet publish -c Release -r ${{ matrix.rid }} --self-contained true \
+            -p:PublishSingleFile=${{ matrix.singlefile }} \
+            -p:DebugType=none \
+            -p:EnableCompressionInSingleFile=true \
+            -p:InformationalVersion=${{ steps.version.outputs.version }} \
+            -o ./publish/${{ matrix.rid }} XOSC.csproj
+        shell: bash
 
-      - name: Build single-file for Linux x64
+      # === AppImage packaging (only on Linux AppImage build) ===
+      - name: Create AppImage
+        if: matrix.appimage
         run: |
-          $hash = "${{ steps.get_version.outputs.version }}"
-          dotnet publish -c Release -r linux-x64 --self-contained true `
-            -p:PublishSingleFile=true `
-            -p:DebugType=none `
-            -p:EnableCompressionInSingleFile=true `
-            -p:InformationalVersion=$hash `
-            -p:AssemblyTitle=XOSC `
-            -p:AssemblyName=XOSC `
-            -o ./publish/linux-x64 XOSC.csproj
-        shell: powershell
+          mkdir -p AppDir/usr/bin
+          mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
 
-      - name: Create ZIP archive with both platforms
+          # Copy published files
+          cp -r ./publish/linux-x64/* AppDir/usr/bin/
+
+          # Desktop file
+          cat > AppDir/xosc.desktop << EOF
+          [Desktop Entry]
+          Name=XOSC
+          Exec=XOSC
+          Icon=xosc
+          Type=Application
+          Categories=Utility;
+          Terminal=false
+          EOF
+
+          # AppRun
+          cat > AppDir/AppRun << 'EOF'
+          #!/bin/bash
+          HERE="$(dirname "$(readlink -f "${0}")")"
+          exec "$HERE/usr/bin/XOSC" "$@"
+          EOF
+          chmod +x AppDir/AppRun
+
+          # Icon (copy your icon.png if you have one)
+          if [ -f "icon.png" ]; then
+            cp icon.png AppDir/usr/share/icons/hicolor/256x256/apps/xosc.png
+            cp icon.png AppDir/xosc.png
+          fi
+
+          chmod +x AppDir/AppRun
+
+          # Download and run appimagetool
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool-x86_64.AppImage
+
+          ./appimagetool-x86_64.AppImage AppDir XOSC-${{ steps.version.outputs.version }}-x86_64.AppImage
+        shell: bash
+
+      # === Archive for non-AppImage builds ===
+      - name: Create ZIP archive
+        if: ${{ !matrix.appimage }}
         run: |
-          Compress-Archive -Path ./publish/* -DestinationPath XOSC.zip
-          Write-Host "Created XOSC.zip with single-file executables"
-        shell: powershell
+          cd publish
+          zip -r ../XOSC-${{ steps.version.outputs.version }}-${{ matrix.rid }}.zip ${{ matrix.rid }}
+        shell: bash
+      
+      # Upload artifacts
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: XOSC-${{ matrix.rid }}${{ matrix.appimage && '-AppImage' || '' }}
+          path: |
+            *.AppImage
+            *.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
 
       - name: Create Release
         uses: ncipollo/release-action@v1
         with:
-          artifacts: ./XOSC.zip
-          tag: v${{ steps.get_version.outputs.version }}
-          name: v${{ steps.get_version.outputs.version }}
+          artifacts: ./artifacts/**/*.*
+          tag: v${{ needs.build.outputs.version || github.sha }}
+          name: v${{ needs.build.outputs.version || github.sha }}
           prerelease: false
-          allowUpdates: true
           makeLatest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
