@@ -12,7 +12,6 @@ jobs:
         include:
           - os: windows-latest
             rid: win-x64
-
           - os: ubuntu-latest
             rid: linux-x64
 
@@ -38,13 +37,13 @@ jobs:
       - name: Publish
         run: |
           dotnet publish -c Release -r ${{ matrix.rid }} --self-contained true \
-            -p:PublishSingleFile=true -p:DebugType=none \
+            -p:PublishSingleFile=true \
+            -p:DebugType=none \
             -p:EnableCompressionInSingleFile=true \
-            -p:InformationalVersion=${{ steps.version.outputs.version }} \
             -o ./publish/${{ matrix.rid }} XOSC.csproj
         shell: bash
 
-      - name: Upload build
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: build-${{ matrix.rid }}
@@ -65,7 +64,7 @@ jobs:
           path: ./publish/linux-x64
 
       - name: Install FUSE
-        run: sudo apt-get update && sudo apt-get install -y libfuse2t64 || true
+        run: sudo apt-get update && sudo apt-get install -y libfuse2t64 || sudo apt-get install -y libfuse2
 
       - name: Create AppImage
         run: |
@@ -89,12 +88,9 @@ jobs:
           EOF
           chmod +x AppDir/AppRun
 
-          if [ -f icon.png ]; then
-            cp icon.png AppDir/xosc.png
-          fi
-
           wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
+
           ./appimagetool-x86_64.AppImage --appimage-extract-and-run AppDir XOSC-x86_64.AppImage
         shell: bash
 
@@ -109,7 +105,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download everything
+      - name: Download all
         uses: actions/download-artifact@v4
         with:
           path: ./builds
@@ -118,20 +114,14 @@ jobs:
         run: |
           mkdir -p XOSC/win-x64 XOSC/linux-x64
           
-          # Windows
           cp -r builds/build-win-x64/* XOSC/win-x64/ 2>/dev/null || true
-          
-          # Linux
           cp -r builds/build-linux-x64/* XOSC/linux-x64/ 2>/dev/null || true
-          
-          # AppImage
           cp builds/appimage/XOSC-x86_64.AppImage XOSC/linux-x64/ 2>/dev/null || true
           
-          cd XOSC
-          zip -r ../XOSC.zip .
+          cd XOSC && zip -r ../XOSC.zip . 
         shell: bash
 
-      - name: Upload final zip
+      - name: Upload final
         uses: actions/upload-artifact@v4
         with:
           name: XOSC
@@ -144,18 +134,17 @@ jobs:
       contents: write
 
     steps:
-      - name: Download XOSC.zip
+      - name: Download final
         uses: actions/download-artifact@v4
         with:
           name: XOSC
 
-      - name: Create Release
+      - name: Release
         uses: ncipollo/release-action@v1
         with:
           artifacts: XOSC.zip
           tag: ${{ needs.build.outputs.version }}
           name: ${{ needs.build.outputs.version }}
-          prerelease: false
           makeLatest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
