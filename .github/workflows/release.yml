@@ -62,7 +62,7 @@ jobs:
           name: build-linux-x64
           path: ./publish/linux-x64
 
-      - name: Prepare AppDir
+      - name: Create AppImage
         run: |
           mkdir -p AppDir/usr/bin
           cp -r ./publish/linux-x64/* AppDir/usr/bin/
@@ -83,14 +83,14 @@ jobs:
           EOF
           chmod +x AppDir/AppRun
           chmod +x AppDir/usr/bin/XOSC
-        shell: bash
 
-      - name: Create AppImage
-        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse2t64 || sudo apt-get install -y libfuse2
+
           wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
 
-          ARCH=x86_64 ./appimagetool-x86_64.AppImage AppDir XOSC-x86_64.AppImage
+          ARCH=x86_64 ./appimagetool-x86_64.AppImage --appimage-extract-and-run AppDir XOSC-x86_64.AppImage
         shell: bash
 
       - name: Upload AppImage
@@ -98,7 +98,7 @@ jobs:
         with:
           name: appimage
           path: XOSC-x86_64.AppImage
-  
+
   package:
     needs: [build, appimage]
     runs-on: ubuntu-latest
@@ -120,7 +120,7 @@ jobs:
           cd XOSC && zip -r ../XOSC.zip .
         shell: bash
 
-      - name: Upload final
+      - name: Upload final XOSC.zip
         uses: actions/upload-artifact@v4
         with:
           name: XOSC
@@ -133,17 +133,18 @@ jobs:
       contents: write
 
     steps:
-      - name: Download
+      - name: Download final zip
         uses: actions/download-artifact@v4
         with:
           name: XOSC
 
-      - name: Release
+      - name: Create Release
         uses: ncipollo/release-action@v1
         with:
           artifacts: XOSC.zip
           tag: ${{ needs.build.outputs.version }}
           name: ${{ needs.build.outputs.version }}
+          prerelease: false
           makeLatest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
