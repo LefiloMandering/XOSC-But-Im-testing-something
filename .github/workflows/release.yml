@@ -37,8 +37,7 @@ jobs:
       - name: Publish
         run: |
           dotnet publish -c Release -r ${{ matrix.rid }} --self-contained true \
-            -p:PublishSingleFile=true \
-            -p:DebugType=none \
+            -p:PublishSingleFile=true -p:DebugType=none \
             -p:EnableCompressionInSingleFile=true \
             -o ./publish/${{ matrix.rid }} XOSC.csproj
         shell: bash
@@ -57,14 +56,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download Linux build
+      - name: Download Linux
         uses: actions/download-artifact@v4
         with:
           name: build-linux-x64
           path: ./publish/linux-x64
-
-      - name: Install FUSE
-        run: sudo apt-get update && sudo apt-get install -y libfuse2t64 || sudo apt-get install -y libfuse2
 
       - name: Create AppImage
         run: |
@@ -91,7 +87,7 @@ jobs:
           wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
 
-          ./appimagetool-x86_64.AppImage --appimage-extract-and-run AppDir XOSC-x86_64.AppImage
+          ARCH=x86_64 ./appimagetool-x86_64.AppImage --appimage-extract-and-run AppDir XOSC-x86_64.AppImage
         shell: bash
 
       - name: Upload AppImage
@@ -118,7 +114,7 @@ jobs:
           cp -r builds/build-linux-x64/* XOSC/linux-x64/ 2>/dev/null || true
           cp builds/appimage/XOSC-x86_64.AppImage XOSC/linux-x64/ 2>/dev/null || true
           
-          cd XOSC && zip -r ../XOSC.zip . 
+          cd XOSC && zip -r ../XOSC.zip .
         shell: bash
 
       - name: Upload final
@@ -134,7 +130,7 @@ jobs:
       contents: write
 
     steps:
-      - name: Download final
+      - name: Download
         uses: actions/download-artifact@v4
         with:
           name: XOSC
