@@ -41,8 +41,7 @@ jobs:
 
       - name: Get short commit hash
         id: version
-        run: |
-          echo "version=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+        run: echo "version=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
         shell: bash
 
       # === Build ===
@@ -56,17 +55,15 @@ jobs:
             -o ./publish/${{ matrix.rid }} XOSC.csproj
         shell: bash
 
-      # === AppImage packaging (only on Linux AppImage build) ===
+      # === AppImage (only for the AppImage matrix entry) ===
       - name: Create AppImage
         if: matrix.appimage
         run: |
           mkdir -p AppDir/usr/bin
           mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
 
-          # Copy published files
           cp -r ./publish/linux-x64/* AppDir/usr/bin/
 
-          # Desktop file
           cat > AppDir/xosc.desktop << EOF
           [Desktop Entry]
           Name=XOSC
@@ -77,7 +74,6 @@ jobs:
           Terminal=false
           EOF
 
-          # AppRun
           cat > AppDir/AppRun << 'EOF'
           #!/bin/bash
           HERE="$(dirname "$(readlink -f "${0}")")"
@@ -85,37 +81,33 @@ jobs:
           EOF
           chmod +x AppDir/AppRun
 
-          # Icon (copy your icon.png if you have one)
+          # Icon (optional but nice)
           if [ -f "icon.png" ]; then
-            cp icon.png AppDir/usr/share/icons/hicolor/256x256/apps/xosc.png
             cp icon.png AppDir/xosc.png
+            cp icon.png AppDir/usr/share/icons/hicolor/256x256/apps/xosc.png
           fi
 
-          chmod +x AppDir/AppRun
-
-          # Download and run appimagetool
           wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
 
           ./appimagetool-x86_64.AppImage AppDir XOSC-${{ steps.version.outputs.version }}-x86_64.AppImage
         shell: bash
 
-      # === Archive for non-AppImage builds ===
+      # === ZIP for normal builds ===
       - name: Create ZIP archive
         if: ${{ !matrix.appimage }}
         run: |
           cd publish
           zip -r ../XOSC-${{ steps.version.outputs.version }}-${{ matrix.rid }}.zip ${{ matrix.rid }}
         shell: bash
-      
-      # Upload artifacts
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: XOSC-${{ matrix.rid }}${{ matrix.appimage && '-AppImage' || '' }}
           path: |
-            *.AppImage
             *.zip
+            *.AppImage
 
   release:
     needs: build
@@ -133,8 +125,8 @@ jobs:
         uses: ncipollo/release-action@v1
         with:
           artifacts: ./artifacts/**/*.*
-          tag: v${{ needs.build.outputs.version || github.sha }}
-          name: v${{ needs.build.outputs.version || github.sha }}
+          tag: v${{ steps.version.outputs.version || github.sha }}
+          name: v${{ steps.version.outputs.version || github.sha }}
           prerelease: false
           makeLatest: true
         env:
