@@ -29,6 +29,13 @@ jobs:
           echo "New version: $NEW_VERSION"
         shell: bash
 
+      - name: Push new tag
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git tag v${{ steps.bump.outputs.version }}
+          git push origin v${{ steps.bump.outputs.version }}
+
   build:
     needs: versioning
     strategy:
