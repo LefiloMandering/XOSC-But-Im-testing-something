@@ -143,8 +143,8 @@ jobs:
         uses: ncipollo/release-action@v1
         with:
           artifacts: XOSC.zip
-          tag: latest
-          name: latest
+          tag: ${{ needs.build.outputs.version }}
+          name: ${{ needs.build.outputs.version }}
           prerelease: false
           makeLatest: true
         env:
