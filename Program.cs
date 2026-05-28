@@ -262,9 +262,13 @@ namespace XOSC
                 string tag = doc.RootElement.GetProperty("tag_name").GetString() ?? "";
                 string latestVersion = tag.TrimStart('v');
 
-                if (latestVersion == Program.AppVersion)
+                // Normalize local version (remove +build metadata)
+                string localVersion = Program.AppVersion.Split('+')[0];
+
+                // Compare versions
+                if (localVersion == latestVersion)
                 {
-                    Status = "already up to date";
+                    Status = "It's on the same version — we're already on latest";
                     return;
                 }
 
@@ -286,7 +290,8 @@ namespace XOSC
 
                 using var ms = new MemoryStream(z);
                 using var arch = new ZipArchive(ms);
-                
+
+                // Correct folder structure based on your actual ZIP
                 string platformFolder = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
                     ? "win-x64/"
                     : "linux-x64/";
@@ -359,6 +364,7 @@ namespace XOSC
             }
         }
     }
+
 
 
     public static class MusicChatEngine
