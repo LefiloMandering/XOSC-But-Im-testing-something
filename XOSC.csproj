@@ -7,33 +7,34 @@
         <Nullable>enable</Nullable>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
         <UseWindowsForms>false</UseWindowsForms>
-
-        <!-- Windows: embed icon into the .exe so it shows in Explorer -->
-        <DefineConstants>WINDOWS</DefineConstants>
         <ApplicationIcon Condition="$([MSBuild]::IsOsPlatform('Windows'))">icon.ico</ApplicationIcon>
-
-        <!-- Version info -->
         <AssemblyVersion>2.0.2.6</AssemblyVersion>
         <FileVersion>2.0.2.6</FileVersion>
         <Product>VRChat Unfriend Manager</Product>
         <Description>Manage and unfriend VRChat friends</Description>
     </PropertyGroup>
 
+    <!-- WINDOWS_BUILD is defined on Windows so #if guards in NativeMethods.cs and HardwareService.cs work -->
+    <PropertyGroup Condition="$([MSBuild]::IsOsPlatform('Windows'))">
+        <DefineConstants>$(DefineConstants);WINDOWS_BUILD</DefineConstants>
+    </PropertyGroup>
+
     <ItemGroup>
-        <!-- Cross Platform GUI Libraries -->
         <PackageReference Include="CoreOSC" Version="1.0.0" />
-        <PackageReference Include="LibreHardwareMonitorLib" Version="0.9.6" />
         <PackageReference Include="Raylib-cs" Version="7.0.2" />
         <PackageReference Include="rlImgui-cs" Version="3.2.0" />
         <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
         <PackageReference Include="Microsoft.Data.Sqlite" Version="11.0.0-preview.3.26207.106" />
-        <!-- VRChat API -->
         <PackageReference Include="VRChat.API" Version="2.20.8-nightly.9-hotfix.1" />
         <PackageReference Include="VRCOscLib" Version="1.6.0" />
     </ItemGroup>
 
+    <!-- LibreHardwareMonitor is Windows-only — must not be restored on Linux -->
+    <ItemGroup Condition="$([MSBuild]::IsOsPlatform('Windows'))">
+        <PackageReference Include="LibreHardwareMonitorLib" Version="0.9.6" />
+    </ItemGroup>
+
     <ItemGroup>
-        <!-- Embed icons into the assembly (existing behaviour) -->
         <None Remove="icon.png" />
         <EmbeddedResource Include="icon.png">
             <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

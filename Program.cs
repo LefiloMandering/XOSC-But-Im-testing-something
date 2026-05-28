@@ -21,9 +21,7 @@ using System.Globalization;
 using Raylib_cs;
 using ImGuiNET;
 using rlImGui_cs;
-#if WINDOWS
-using LibreHardwareMonitor.Hardware;
-#endif
+// NativeMethods and HardwareService are in platform-specific files (*.Windows.cs / *.Linux.cs)
 
 namespace XOSC
 {
@@ -120,26 +118,8 @@ namespace XOSC
         public float FrameRounding = 5f;
     }
 
-    public static class NativeMethods
-    {
-#if WINDOWS
-        [StructLayout(LayoutKind.Sequential)]
-        public struct FILETIME { public uint dwLowDateTime; public uint dwHighDateTime; public ulong ToULong() => ((ulong)dwHighDateTime << 32) | dwLowDateTime; }
-        
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern bool GetSystemTimes(out FILETIME lpIdleTime, out FILETIME lpKernelTime, out FILETIME lpUserTime);
+    // NativeMethods is in NativeMethods.cs (single file, #if WINDOWS_BUILD guards inside)
 
-        [StructLayout(LayoutKind.Sequential)]
-        public struct MEMORYSTATUSEX { public uint dwLength; public uint dwMemoryLoad; public ulong ullTotalPhys; public ulong ullAvailPhys; public ulong ullTotalPageFile; public ulong ullAvailPageFile; public ulong ullTotalVirtual; public ulong ullAvailVirtual; public ulong ullAvailExtendedVirtual; }
-        
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
-        [DllImport("kernel32.dll")]
-        public static extern bool FreeConsole();
-#endif
-        [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
-        public static unsafe void RaylibLogCallback(int logLevel, sbyte* text, sbyte* args) { }
-    }
 
     // --------------------------------------------------------------------------
     // Formatter Extensions
@@ -163,303 +143,8 @@ namespace XOSC
         }
     }
 
-    // --------------------------------------------------------------------------
-    // HardwareService — Windows uses LibreHardwareMonitor, Linux uses /proc+sysfs
-    // --------------------------------------------------------------------------
-    public static class HardwareService
-    {
-        // Public properties — same surface on both platforms
-        public static string CpuLoad    { get; private set; } = "--%";
-        public static string GpuLoad    { get; private set; } = "--%";
-        public static string RamUsed    { get; private set; } = "-- GB";
-        public static string RamTotal   { get; private set; } = "-- GB";
-        public static string RamDdr     { get; private set; } = "";
-        public static string VramUsed   { get; private set; } = "-- GB";
-        public static string VramTotal  { get; private set; } = "-- GB";
-        public static string CpuTemp    { get; private set; } = "--°C";
-        public static string CpuPower   { get; private set; } = "--W";
-        public static string GpuTemp    { get; private set; } = "--°C";
-        public static string GpuHotspot { get; private set; } = "--°C";
-        public static string GpuPower   { get; private set; } = "--W";
+    // HardwareService is in HardwareService.cs (single file, #if WINDOWS_BUILD guards inside)
 
-#if WINDOWS
-        // ── Windows: LibreHardwareMonitor ─────────────────────────────────────
-        private static Computer _computer;
-        private static bool _initialized;
-        private static IHardware _cpu;
-        private static IHardware _gpu;
-        private static IHardware _igpu;
-        private static IHardware _ram;
-
-        public static void Initialize()
-        {
-            if (_initialized) return;
-            _computer = new Computer
-            {
-                IsCpuEnabled = true,
-                IsGpuEnabled = true,
-                IsMemoryEnabled = true,
-                IsMotherboardEnabled = true,
-                IsControllerEnabled = true
-            };
-            _computer.Open();
-            _computer.Accept(new UpdateVisitor());
-
-            _cpu = _computer.Hardware.FirstOrDefault(h => h.HardwareType == HardwareType.Cpu);
-
-            var gpus = _computer.Hardware.Where(h =>
-                h.HardwareType == HardwareType.GpuNvidia ||
-                h.HardwareType == HardwareType.GpuAmd ||
-                h.HardwareType == HardwareType.GpuIntel).ToList();
-
-            string[] igpuKeywords = { "integrated", "radeon(tm) graphics", "radeon graphics", "vega", "uhd graphics", "iris xe" };
-            _gpu = gpus.FirstOrDefault(h => !igpuKeywords.Any(k => h.Name.Contains(k, StringComparison.OrdinalIgnoreCase)));
-            if (_gpu == null) _gpu = gpus.FirstOrDefault();
-            _igpu = gpus.FirstOrDefault(h => igpuKeywords.Any(k => h.Name.Contains(k, StringComparison.OrdinalIgnoreCase)));
-
-            _ram = _computer.Hardware.FirstOrDefault(h => h.HardwareType == HardwareType.Memory);
-            RamDdr = GetDDRVersion();
-            _initialized = true;
-        }
-
-        public static void Update()
-        {
-            if (!_initialized) return;
-            _computer.Accept(new UpdateVisitor());
-
-            if (_cpu != null)
-            {
-                CpuLoad  = GetHighestSensorValue(_cpu, SensorType.Load,        new[] { "CPU Total", "Total" },                   "--%",  v => $"{v:F0}%",  strict: false);
-                CpuTemp  = GetHighestSensorValue(_cpu, SensorType.Temperature, new[] { "Package", "Core", "Tctl", "Tdie", "CCD" }, "--°C", v => $"{v:F0}°C", strict: false);
-                if (CpuTemp == "--°C" && _igpu != null)
-                    CpuTemp = GetHighestSensorValue(_igpu, SensorType.Temperature, new[] { "Core", "Package", "Hot Spot", "Hotspot" }, "--°C", v => $"{v:F0}°C", strict: false);
-                CpuPower = GetHighestSensorValue(_cpu, SensorType.Power,       new[] { "Package", "Core", "PPT" },               "--W",  v => $"{v:F0}W",  strict: false);
-                if (CpuPower == "--W" && _igpu != null)
-                    CpuPower = GetHighestSensorValue(_igpu, SensorType.Power, new[] { "Package", "Core", "Power", "PPT" }, "--W", v => $"{v:F0}W", strict: false);
-            }
-
-            if (_gpu != null)
-            {
-                GpuLoad    = GetHighestSensorValue(_gpu, SensorType.Load,        new[] { "3D", "Core" },                                     "--% ", v => $"{v:F0}%",  strict: true);
-                GpuTemp    = GetHighestSensorValue(_gpu, SensorType.Temperature, new[] { "GPU Core", "Core" },                               "--°C ", v => $"{v:F0}°C", strict: false);
-                GpuHotspot = GetHighestSensorValue(_gpu, SensorType.Temperature, new[] { "Hot spot", "Hotspot" },                            "--°C ", v => $"{v:F0}°C", strict: true);
-                GpuPower   = GetHighestSensorValue(_gpu, SensorType.Power,       new[] { "GPU Power", "Package", "Total Board", "PPT" },     "--W ",  v => $"{v:F0}W",  strict: false);
-
-                float? vramUsed  = GetVramSensorValue(_gpu, new[] { "Dedicated Memory Used",  "Memory Used"  });
-                float? vramTotal = GetVramSensorValue(_gpu, new[] { "Dedicated Memory Total", "Memory Total" });
-                if (vramUsed.HasValue && vramTotal.HasValue)
-                {
-                    VramUsed  = $"{vramUsed.Value  / 1024f:F1} GB";
-                    VramTotal = $"{vramTotal.Value / 1024f:F1} GB";
-                }
-            }
-
-            var memStatus = new NativeMethods.MEMORYSTATUSEX();
-            memStatus.dwLength = (uint)Marshal.SizeOf(memStatus);
-            if (NativeMethods.GlobalMemoryStatusEx(ref memStatus))
-            {
-                double usedGB  = (memStatus.ullTotalPhys - memStatus.ullAvailPhys) / (1024.0 * 1024.0 * 1024.0);
-                double totalGB = memStatus.ullTotalPhys / (1024.0 * 1024.0 * 1024.0);
-                RamUsed  = $"{usedGB:F1} GB";
-                RamTotal = $"{totalGB:F1} GB";
-            }
-        }
-
-        public static void Close() { _computer?.Close(); _initialized = false; }
-
-        private static string GetDDRVersion()
-        {
-            try
-            {
-                var psi = new ProcessStartInfo("powershell", "-NoProfile -Command \"(Get-CimInstance Win32_PhysicalMemory).SMBIOSMemoryType\"")
-                    { RedirectStandardOutput = true, CreateNoWindow = true, UseShellExecute = false };
-                using var p = Process.Start(psi);
-                string output = p.StandardOutput.ReadToEnd().Trim();
-                var lines = output.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
-                if (lines.Length > 0 && ushort.TryParse(lines[0].Trim(), out ushort type))
-                    return type switch { 20 => "ᴰᴰᴿ¹", 21 => "ᴰᴰᴿ²", 24 => "ᴰᴰᴿ³", 26 => "ᴰᴰᴿ⁴", 34 => "ᴰᴰᴿ⁵", _ => "ᴰᴰᴿ" };
-            }
-            catch { }
-            return "";
-        }
-
-        private static string GetHighestSensorValue(IHardware hw, SensorType type, string[] nameParts, string fallback, Func<float, string> fmt, bool strict = false)
-        {
-            if (hw == null) return fallback;
-            var allSensors = new List<ISensor>(hw.Sensors);
-            foreach (var sub in hw.SubHardware) allSensors.AddRange(sub.Sensors);
-            var sensors = allSensors.Where(x => x.SensorType == type).ToList();
-            if (nameParts != null && nameParts.Length > 0)
-            {
-                var matched = sensors.Where(x => nameParts.Any(p => x.Name.Contains(p, StringComparison.OrdinalIgnoreCase))).ToList();
-                if (matched.Count > 0) sensors = matched;
-                else if (strict) return fallback;
-            }
-            float maxVal = -1; bool found = false;
-            foreach (var s in sensors)
-                if (s.Value.HasValue && s.Value.Value > 0 && (!found || s.Value.Value > maxVal)) { maxVal = s.Value.Value; found = true; }
-            return found ? fmt(maxVal) : fallback;
-        }
-
-        private static float? GetVramSensorValue(IHardware hw, string[] priorityNames)
-        {
-            if (hw == null) return null;
-            var allSensors = new List<ISensor>(hw.Sensors);
-            foreach (var sub in hw.SubHardware) allSensors.AddRange(sub.Sensors);
-            foreach (var name in priorityNames)
-            {
-                var sensor = allSensors.FirstOrDefault(s =>
-                    (s.SensorType == SensorType.Data || s.SensorType == SensorType.SmallData) &&
-                    s.Name.Contains(name, StringComparison.OrdinalIgnoreCase) && s.Value.HasValue);
-                if (sensor != null) return sensor.Value.Value;
-            }
-            var fallbackSensor = allSensors.FirstOrDefault(s =>
-                (s.SensorType == SensorType.Data || s.SensorType == SensorType.SmallData) &&
-                (s.Name.Contains("GPU Memory Total", StringComparison.OrdinalIgnoreCase) || s.Name.Contains("Memory Total", StringComparison.OrdinalIgnoreCase)) &&
-                s.Value.HasValue);
-            return fallbackSensor?.Value;
-        }
-
-        private class UpdateVisitor : IVisitor
-        {
-            public void VisitComputer(IComputer computer) { computer.Traverse(this); }
-            public void VisitHardware(IHardware hardware) { hardware.Update(); foreach (var sub in hardware.SubHardware) sub.Accept(this); }
-            public void VisitSensor(ISensor sensor) { }
-            public void VisitParameter(IParameter parameter) { }
-        }
-
-#else
-        // ── Linux: /proc + sysfs + nvidia-smi — zero LHM references ──────────
-
-        public static void Initialize() { } // nothing to open
-        public static void Close()      { } // nothing to close
-
-        public static void Update()
-        {
-            UpdateCpuLoad();
-            UpdateCpuTemp();
-            UpdateRam();
-            UpdateGpu();
-        }
-
-        private static void UpdateCpuLoad()
-        {
-            try
-            {
-                var line = File.ReadLines("/proc/stat").FirstOrDefault(l => l.StartsWith("cpu "));
-                if (line == null) { CpuLoad = "--%"; return; }
-                var p = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                if (p.Length < 5) { CpuLoad = "--%"; return; }
-                long user = long.Parse(p[1]), nice = long.Parse(p[2]),
-                     sys  = long.Parse(p[3]), idle = long.Parse(p[4]),
-                     iow  = p.Length > 5 ? long.Parse(p[5]) : 0;
-                long total = user + nice + sys + idle + iow;
-                long busy  = total - idle - iow;
-                CpuLoad = total > 0 ? $"{busy * 100.0 / total:F0}%" : "--%";
-            }
-            catch { CpuLoad = "--%"; }
-        }
-
-        private static void UpdateCpuTemp()
-        {
-            try
-            {
-                double best = double.MinValue;
-                foreach (var zone in Directory.GetDirectories("/sys/class/thermal", "thermal_zone*"))
-                {
-                    string tempPath = Path.Combine(zone, "temp");
-                    string typePath = Path.Combine(zone, "type");
-                    if (!File.Exists(tempPath)) continue;
-                    string type = File.Exists(typePath) ? File.ReadAllText(typePath).Trim() : "";
-                    if (!type.Contains("acpitz") && !type.Contains("x86_pkg") && !type.Contains("cpu")) continue;
-                    if (double.TryParse(File.ReadAllText(tempPath).Trim(), out double raw))
-                        best = Math.Max(best, raw / 1000.0);
-                }
-                CpuTemp = best > double.MinValue ? $"{best:F0}°C" : "--°C";
-            }
-            catch { CpuTemp = "--°C"; }
-        }
-
-        private static void UpdateRam()
-        {
-            try
-            {
-                long memTotal = 0, memAvail = 0;
-                foreach (var line in File.ReadAllLines("/proc/meminfo"))
-                {
-                    var parts = line.Split(':', 2);
-                    if (parts.Length < 2) continue;
-                    if (parts[0] == "MemTotal"     && long.TryParse(parts[1].Trim().Split(' ')[0], out long t)) memTotal = t;
-                    if (parts[0] == "MemAvailable" && long.TryParse(parts[1].Trim().Split(' ')[0], out long a)) memAvail = a;
-                }
-                RamUsed  = $"{(memTotal - memAvail) / (1024.0 * 1024.0):F1} GB";
-                RamTotal = $"{memTotal / (1024.0 * 1024.0):F1} GB";
-            }
-            catch { RamUsed = "-- GB"; RamTotal = "-- GB"; }
-        }
-
-        private static void UpdateGpu()
-        {
-            // Try NVIDIA first via nvidia-smi
-            try
-            {
-                var psi = new ProcessStartInfo("nvidia-smi",
-                    "--query-gpu=utilization.gpu,temperature.gpu,power.draw,memory.used,memory.total --format=csv,noheader,nounits")
-                    { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true };
-                using var proc = Process.Start(psi);
-                string? raw = proc?.StandardOutput.ReadLine()?.Trim();
-                if (!string.IsNullOrEmpty(raw))
-                {
-                    var v = raw.Split(',');
-                    if (v.Length >= 5)
-                    {
-                        GpuLoad  = $"{v[0].Trim()}%";
-                        GpuTemp  = $"{v[1].Trim()}°C";
-                        GpuPower = $"{double.Parse(v[2].Trim(), CultureInfo.InvariantCulture):F0}W";
-                        VramUsed  = $"{double.Parse(v[3].Trim(), CultureInfo.InvariantCulture) / 1024.0:F1} GB";
-                        VramTotal = $"{double.Parse(v[4].Trim(), CultureInfo.InvariantCulture) / 1024.0:F1} GB";
-                        return;
-                    }
-                }
-            }
-            catch { }
-
-            // Fallback: AMD via /sys/class/drm
-            try
-            {
-                string busyFile = "/sys/class/drm/card0/device/gpu_busy_percent";
-                if (File.Exists(busyFile)) GpuLoad = $"{File.ReadAllText(busyFile).Trim()}%";
-
-                string hwmonBase = "/sys/class/drm/card0/device/hwmon";
-                if (Directory.Exists(hwmonBase))
-                {
-                    var hwmon = Directory.GetDirectories(hwmonBase).FirstOrDefault();
-                    if (hwmon != null)
-                    {
-                        var tempFile = Directory.GetFiles(hwmon, "temp1_input").FirstOrDefault();
-                        if (tempFile != null && double.TryParse(File.ReadAllText(tempFile).Trim(), out double tRaw))
-                            GpuTemp = $"{tRaw / 1000.0:F0}°C";
-
-                        var pwrFile = Directory.GetFiles(hwmon, "power1_average").FirstOrDefault();
-                        if (pwrFile != null && double.TryParse(File.ReadAllText(pwrFile).Trim(), out double pRaw))
-                            GpuPower = $"{pRaw / 1_000_000.0:F0}W";
-                    }
-                }
-
-                string memUsedFile  = "/sys/class/drm/card0/device/mem_info_vram_used";
-                string memTotalFile = "/sys/class/drm/card0/device/mem_info_vram_total";
-                if (File.Exists(memUsedFile) && File.Exists(memTotalFile) &&
-                    long.TryParse(File.ReadAllText(memUsedFile).Trim(),  out long vU) &&
-                    long.TryParse(File.ReadAllText(memTotalFile).Trim(), out long vT))
-                {
-                    VramUsed  = $"{vU / (1024.0 * 1024.0 * 1024.0):F1} GB";
-                    VramTotal = $"{vT / (1024.0 * 1024.0 * 1024.0):F1} GB";
-                }
-            }
-            catch { }
-        }
-#endif
-    }
 
     // --------------------------------------------------------------------------
     // NetworkStats - Full throughput + ping
@@ -703,9 +388,7 @@ namespace XOSC
                     }
                 }
                 try { var spot = Process.GetProcessesByName("Spotify"); foreach (var p in spot) { string t = p.MainWindowTitle; if (!string.IsNullOrWhiteSpace(t) && t != "Spotify" && t != "Spotify Premium") return (t, 0, 0); } } catch { }
-#if WINDOWS
-                StringBuilder b = new StringBuilder(256); IntPtr h = GetForegroundWindow(); if (GetWindowText(h, b, 256) > 0) { string t = b.ToString(); if (t.Contains("YouTube") || t.Contains("SoundCloud") || t.Contains("Spotify")) return (Regex.Replace(t, @" - (Spotify|YouTube|SoundCloud).*", "").Trim(), 0, 0); }
-#endif
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) { StringBuilder b = new StringBuilder(256); IntPtr h = NativeMethods.GetForegroundWindow(); if (NativeMethods.GetWindowText(h, b, 256) > 0) { string t = b.ToString(); if (t.Contains("YouTube") || t.Contains("SoundCloud") || t.Contains("Spotify")) return (Regex.Replace(t, @" - (Spotify|YouTube|SoundCloud).*", "").Trim(), 0, 0); } }
                 return ("Chilling", 0, 0);
             } else {
                 try { var psi = new ProcessStartInfo("playerctl", "metadata --format \"{{artist}} - {{title}}\"") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true }; using var p = Process.Start(psi); string r = p?.StandardOutput.ReadToEnd().Trim() ?? ""; if (!string.IsNullOrEmpty(r) && r != " - ") { double pos = 0, len = 0; try { var pP = new ProcessStartInfo("playerctl", "position") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true }; using var pp = Process.Start(pP); double.TryParse(pp?.StandardOutput.ReadToEnd().Trim(), out pos); var pL = new ProcessStartInfo("playerctl", "metadata mpris:length") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true }; using var pl = Process.Start(pL); if (long.TryParse(pl?.StandardOutput.ReadToEnd().Trim(), out long lM)) len = lM / 1000000.0; } catch { } return (r, pos, len); } } catch { } return ("Chilling", 0, 0);
@@ -715,9 +398,7 @@ namespace XOSC
         private static void ScrapeHardwareNames() { string log = Program.FindVrcLog(); if (log == null) return; try { using var fs = new FileStream(log, FileMode.Open, FileAccess.Read, FileShare.ReadWrite); using var sr = new StreamReader(fs); string l; int count = 0; while ((l = sr.ReadLine()) != null && count < 2000) { count++; if (l.Contains("Processor Type:")) { string r = l.Substring(l.IndexOf(':') + 1); _cpu = Regex.Replace(Regex.Replace(r, @"(?i)(AMD|Intel(?:\(R\))?|Core(?:\(TM\))?|Ryzen|\d+-Core|Processor|@.*)", " "), @"\s+", " ").Trim(); } else if (l.Contains("Graphics Device Name:")) { string r = l.Substring(l.IndexOf(':') + 1); _gpu = Regex.Replace(Regex.Replace(r, @"(?i)(NVIDIA|AMD|GeForce|Radeon|Graphics|\(RADV.*?\)|Direct3D.*)", ""), @"\s+", " ").Trim(); } } } catch { } }
         private static string GetDistroName() { if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return "Windows"; try { if (File.Exists("/etc/os-release")) { string? n = null, p = null; foreach (var l in File.ReadLines("/etc/os-release")) { if (l.StartsWith("NAME=")) n = l[5..].Trim('"', '\''); if (l.StartsWith("PRETTY_NAME=")) p = l[12..].Trim('"', '\''); } return (n ?? p ?? "Linux").Split(' ')[0]; } } catch { } return "Linux"; }
         private static string Stylize(string t) { string n = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", s = "ᵃᵇᶜᵈᵉᶠᵍʰᶦʲᵏˡᵐⁿᵒᵖᵠʳˢᵗᵘᵛʷˣʸᶻᵃᵇᶜᵈᵉᶠᵍʰᶦʲᵏˡᵐⁿᵒᵖᵠʳˢᵗᵘᵛʷˣʸᶻ⁰¹²³⁴⁵⁶⁷⁸⁹"; StringBuilder sb = new(); foreach (char c in t) { int i = n.IndexOf(c); sb.Append(i != -1 ? s[i] : c); } return sb.ToString(); }
-#if WINDOWS
-        [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll")] private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
-#endif
+        // GetForegroundWindow / GetWindowText are in NativeMethods.Windows.cs / NativeMethods.Linux.cs
     }
 
     class Program
@@ -742,10 +423,7 @@ namespace XOSC
         static Vector4 DeriveSubText(Vector4 bg) { bool l = (bg.X + bg.Y + bg.Z) / 3f > 0.6f; return l ? new Vector4(0.35f, 0.35f, 0.42f, 1f) : new Vector4(0.52f, 0.52f, 0.60f, 1f); }
         public static void Main() { 
 #if RELEASE
-            unsafe { Raylib.SetTraceLogCallback(&NativeMethods.RaylibLogCallback); } Raylib.SetTraceLogLevel(TraceLogLevel.None); Console.SetOut(TextWriter.Null); Console.SetError(TextWriter.Null);
-#if WINDOWS
-            NativeMethods.FreeConsole();
-#endif
+            unsafe { Raylib.SetTraceLogCallback(&NativeMethods.RaylibLogCallback); } Raylib.SetTraceLogLevel(TraceLogLevel.None); Console.SetOut(TextWriter.Null); Console.SetError(TextWriter.Null); if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) NativeMethods.FreeConsole(); 
 #endif
             LoadConfig(); ColAccent = V4(Config.AccentColor); ColBg = V4(Config.BgColor); ColSidebar = V4(Config.SidebarColor); ColCard = V4(Config.CardColor); ColText = DeriveText(V4(Config.BgColor)); ColSubText = DeriveSubText(V4(Config.BgColor)); _mtx = new Mutex(true, "XOSC_VRC_Unique_Runner", out bool fresh); if (!fresh) Environment.Exit(0); Directory.CreateDirectory(Path.GetDirectoryName(_path)); if (Config.SavedVersion != AppVersion) { Config.SavedVersion = AppVersion; SaveConfig(); } MusicChatEngine.Init(); Raylib.InitWindow(960, 640, "XOSC"); try { string iP = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "icon.png"); if (!File.Exists(iP)) iP = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "icon.ico"); if (File.Exists(iP)) { Image img = Raylib.LoadImage(iP); Raylib.SetWindowIcon(img); Raylib.UnloadImage(img); } } catch { } Raylib.SetWindowState(ConfigFlags.ResizableWindow); rlImGui.Setup(true); Raylib.SetTargetFPS(60); ApplyTheme(); while (!Raylib.WindowShouldClose()) { Raylib.BeginDrawing(); Raylib.ClearBackground(new Color((int)(Config.BgColor[0]*255),(byte)(Config.BgColor[1]*255),(byte)(Config.BgColor[2]*255),255)); rlImGui.Begin(); DrawUI(); rlImGui.End(); Raylib.EndDrawing(); } NetworkStats.Stop(); HardwareService.Close(); SaveConfig(); Raylib.CloseWindow(); }
         public static string FindVrcLog() { if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) { string wP = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "AppData", "LocalLow", "VRChat", "VRChat"); if (Directory.Exists(wP)) return Directory.GetFiles(wP, "output_log_*.txt").OrderByDescending(File.GetLastWriteTime).FirstOrDefault(); return null; } string h = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile); string[] s = { Path.Combine(h, ".local/share/Steam"), Path.Combine(h, ".var/app/com.valvesoftware.Steam/.local/share/Steam") }; foreach (var b in s) { if (!Directory.Exists(b)) continue; string v = Path.Combine(b, "steamapps", "libraryfolders.vdf"); List<string> l = new() { b }; if (File.Exists(v)) { var ms = Regex.Matches(File.ReadAllText(v), "\"path\"\\s+\"(.+?)\""); foreach (Match m in ms) l.Add(m.Groups[1].Value.Replace("\\\\", "/")); } foreach (var lib in l) { string p = Path.Combine(lib, "steamapps/compatdata/438100/pfx/drive_c/users/steamuser/AppData/LocalLow/VRChat/VRChat"); if (Directory.Exists(p)) return Directory.GetFiles(p, "output_log_*.txt").OrderByDescending(File.GetLastWriteTime).FirstOrDefault(); } } return null; }
