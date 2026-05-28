@@ -126,16 +126,26 @@ jobs:
         with:
           path: ./builds
 
-      - name: Create final XOSC.zip
+      - name: Create clean XOSC.zip with proper structure
         run: |
-          mkdir -p final/XOSC
+          mkdir -p XOSC/win-x64 XOSC/linux-x64
           
-          unzip -o builds/build-win-x64/XOSC-win-x64.zip -d final/XOSC/ 2>/dev/null || true
-          unzip -o builds/build-linux-x64/XOSC-linux-x64.zip -d final/XOSC/ 2>/dev/null || true
-          cp builds/build-linux-x64-appimage/XOSC-x86_64.AppImage final/XOSC/ 2>/dev/null || true
+          # Extract Windows
+          if [ -f builds/build-win-x64/XOSC-win-x64.zip ]; then
+            unzip -o builds/build-win-x64/XOSC-win-x64.zip -d XOSC/win-x64/
+          fi
           
-          cd final
-          zip -r ../XOSC.zip XOSC/
+          # Extract Linux
+          if [ -f builds/build-linux-x64/XOSC-linux-x64.zip ]; then
+            unzip -o builds/build-linux-x64/XOSC-linux-x64.zip -d XOSC/linux-x64/
+          fi
+          
+          # Copy AppImage into linux-x64 folder
+          if [ -f builds/build-linux-x64-appimage/XOSC-x86_64.AppImage ]; then
+            cp builds/build-linux-x64-appimage/XOSC-x86_64.AppImage XOSC/linux-x64/
+          fi
+          
+          zip -r XOSC.zip XOSC/
         shell: bash
 
       - name: Upload final XOSC.zip
@@ -145,7 +155,7 @@ jobs:
           path: XOSC.zip
 
   release:
-    needs: [build, package]
+    needs: package
     runs-on: ubuntu-latest
     permissions:
       contents: write
