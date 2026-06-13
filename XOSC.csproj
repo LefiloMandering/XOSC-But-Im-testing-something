@@ -38,7 +38,7 @@
         <None Remove="icon.png" />
         <EmbeddedResource Include="icon.png">
             <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-        </EmbeddedResource>
+        </EmbeddedResource>a
         <None Remove="icon.ico" />
         <EmbeddedResource Include="icon.ico">
             <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
